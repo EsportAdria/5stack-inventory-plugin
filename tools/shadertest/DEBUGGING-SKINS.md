@@ -26,6 +26,75 @@ warrant one:
 
 ---
 
+## Read this first (2026-10-15): the compositor IS Valve's shader now
+
+Production compositing no longer runs the hand port. `compositePaint` renders
+every finish whose static combo is bundled in `src/valveCombos/` (all 60 the
+catalog uses) through **Valve's own decompiled pixel shader**
+(`src/valveReference.ts`), with a small epilogue that repacks rough/metal into
+our layout and keeps the smoked-magazine tint. The hand port in
+`paintComposite.ts` only renders as a fallback: no bundled combo, no extracted
+weapon inputs, a rig debug pass, or a combo that fails to link.
+
+Why: the port was checked against the decompile and 110 of 144 sampled
+finishes were visibly off. Valve's wear math is not one curve — it is ~60
+specialised variants (legacy cavity = ao.R raw on smoothstep 0.58/0.68; HD =
+pow(R,1.5)*0.96 through a remap on 0.56/0.74; hydro/spray/anodized HD strip in
+two layers; legacy and HD gunsmith use different patina formulas). Re-deriving
+each by hand is what kept drifting.
+
+**What that changes about debugging a "wrong skin":**
+
+1. Run the **Valve parity** panel (admin → Skin Tests, top) on it first. In
+   runtime mode a difference means a WIRING bug — a texture bound to the wrong
+   name, a uniform value, the epilogue. With "hand port" ticked it compares the
+   fallback.
+2. If parity is clean and the skin is still wrong, the shader math is not the
+   problem — **the inputs are.** Compare the flat atlas against skinport's baked
+   texture (`skinport-flatmap-groundtruth` memory) and check the material chain
+   and the weapon's composite inputs.
+3. Never "fix" Valve's GLSL. Fix the input, or the binding in valveReference.ts.
+
+Regenerating combos after a CS2 update: `tools/valve-combos/README.md`.
+
+### Corrections this exposed in the notes below
+
+- **Legacy cavity is ao.R, not B.** Every legacy combo reads `_4306 = ao.x`.
+  The port read B for legacy inputs and left 899 finishes barely wearing (AK-47
+  | Asiimov at FT changed 0.6% of its atlas, Valve's shader 20%).
+- **The "fabricated" 0.23 / +0.08 / -wear*0.1 oil-rub terms are REAL** — they
+  are the LEGACY gunsmith/patina formula (c00008), absent only from the HD
+  combos 1447/1529 that note was checked against. A combo tells you the math for
+  ITS feature set, and S_SEPARATE_CHANNEL_INPUTS is one of the features.
+- Template vmats store params AUTHORED, before Valve's bind-time Expressions:
+  the 8 template `g_vPaintDurability` values are all (0,0,0,0), which is only
+  sane as authored-then-`1-x`. The port's loader treats it as already applied
+  (dur 0 → never wears). The runtime binds through the Expressions instead.
+- **The vcompmat's mutators pick the static combo, not the template.**
+  `COMP_MAT_PROPERTY_MUTATOR_SET_VALUE` entries inside the g_tColor /
+  g_tMetalness generations set `F_*` from the skin's exposed switches:
+  `g_bLegacyPatina=True` → `F_PATINA_AGE=0`, `g_bTrilinearProjection=0` →
+  `F_CASE_HARDENING_TRILINEAR=0`, `g_bUsePaintByNumberMasks=0` →
+  `F_USE_ALL_MASKS=0`, some halftone skins `F_SPRAYPAINT_HALFTONE=1`
+  unconditionally. The loader now evaluates them (`PaintDef.params`). Taking
+  the template's F_* put M4A4 | Full Throttle on the patina-AGE combo (copper
+  stripes; the game's are grey).
+- **The seed's draw list is in the vcompmat too.** The
+  `COMP_MAT_PROPERTY_MUTATOR_RANDOM_ROLL_INPUT_VARIABLES` mutator lists every
+  seed-rolled var in draw order: the standard eleven (pattern, wear, grunge),
+  then — on the skins that roll them — `g_flCaseHardeningPatternInfluence`,
+  `g_flCaseHardeningRampOffset`, overlay rotation/offset. Those continue the
+  same `CUniformRandomStream` (`PaintDef.extraRolls`, `SeededVisuals.extra`).
+  The old "a slider at its midpoint means seeded, pin it to 0" heuristic is now
+  only the fallback for skins without their own list; with it, XM1014 |
+  Solitude rendered yellow/coral swirls where the game shows teal and white.
+- Spot-check the runtime against the CDN icon
+  (`inventory.5stack.gg/images/<image>.webp`) after any loader change — a wrong
+  combo or param is obvious at a glance there even when parity is clean,
+  because parity shares the loader.
+
+---
+
 ## The single most important rule
 
 **Get ground truth. Do not infer shader math.**

@@ -1,9 +1,19 @@
-// CS2 paint compositing — a WebGL port of Valve's csgo_customweapon.vfx.
+// CS2 paint compositing — csgo_customweapon.vfx in WebGL.
 //
 // CS2 does NOT shade skins live: it composites the paint into textures in the
 // weapon's paint-UV space (albedo + roughness/metalness), then the weapon
 // renders as ordinary PBR with those maps. We do the same: one offscreen
-// fullscreen pass per output, math transcribed from the shader itself
+// fullscreen pass per output.
+//
+// WHICH SHADER RUNS: Valve's own, decompiled per static combo
+// (src/valveCombos, bound by valveReference.ts) for every finish whose combo is
+// bundled — all 60 the catalog uses. Everything below FRAG in this file is the
+// loader, the seed pipeline, input selection and the render plumbing those
+// share. FRAG itself is the HAND PORT, which now renders only as a fallback
+// (no bundled combo / no weapon inputs / a rig debug pass / a link failure);
+// the admin Valve parity panel measures how far it is from the real thing.
+//
+// The notes below are the port's, math transcribed from the shader itself
 // (GameTracking-CS2 csgo_customweapon.slang, decompiled variant + the
 // Source1 ancestor which carries every per-style branch) and the seed
 // pipeline from cs_custom_weapon_visualsdata_processor.cpp.
@@ -21,6 +31,14 @@
 // - pattern & wear & grunge scale all multiply weaponLength/36 for
 //   spray/anodized-air styles, uvScale for everything else
 import { getAssetOrigin, withAssetVersion } from "./api";
+import {
+  buildValveMaterials,
+  loadValveCombo,
+  programFailed,
+  valveComboId,
+  VALVE_RUNTIME_REV,
+  type ValveInputs,
+} from "./valveReference";
 import {
   applyCompositeTextureState,
   compositeKey,
@@ -192,6 +210,22 @@ export interface PaintDef {
   offsetX: [number, number];
   offsetY: [number, number];
   rotation: [number, number];
+  /** Every scalar/vector/int param the chain names, AS AUTHORED (before Valve's
+   *  bind-time Expressions), skin value over template value, and F_* taken from
+   *  the template unless the skin exposes it — the same precedence as above.
+   *  Loose colours are 0-1 sRGB here, not linear. Read by the Valve reference
+   *  runner (valveReference.ts), which binds uniforms by their shader names and
+   *  applies Valve's Expressions itself, so it does not inherit this loader's
+   *  interpretations. */
+  params: Record<string, number[]>;
+  /** Seed rolls the vcompmat declares AFTER the standard eleven (pattern,
+   *  wear, grunge) — case-hardening ramp offset / pattern influence, overlay
+   *  placement — in draw order, with their bounds. See seededVisuals. */
+  extraRolls: { name: string; bounds: [number, number][] }[];
+  /** Every texture param the chain names, skin over template — so the Valve
+   *  runtime can bind a texture by its shader name when no role above covers
+   *  it (g_tPatinaAgeMask / g_tPatinaAgeColorRamp, for one). */
+  textures: Record<string, string>;
 }
 
 /**
@@ -290,6 +324,12 @@ async function fetchPaintDef(paintMaterial: string): Promise<PaintDef | null> {
     let flt = (_n: string, d: number): number => d;
     let int = (_n: string, d: number): number => d;
     let vec = (_n: string): number[] | undefined => undefined;
+    let vmatJson: {
+      m_textureParams?: { m_name: string; m_pValue: string }[];
+      m_floatParams?: { m_name: string; m_flValue: string }[];
+      m_intParams?: { m_name: string; m_nValue: string }[];
+      m_vectorParams?: { m_name: string; m_value: string[] }[];
+    } | null = null;
     if (vmatPath) {
       const vmat = (await (await paintFetch(vmatPath)).json()) as {
         m_textureParams?: { m_name: string; m_pValue: string }[];
@@ -297,6 +337,7 @@ async function fetchPaintDef(paintMaterial: string): Promise<PaintDef | null> {
         m_intParams?: { m_name: string; m_nValue: string }[];
         m_vectorParams?: { m_name: string; m_value: string[] }[];
       };
+      vmatJson = vmat;
       tex = (n) => vmat.m_textureParams?.find((t) => t.m_name === n)?.m_pValue;
       flt = (n, d) => {
         const v = vmat.m_floatParams?.find((f) => f.m_name === n)?.m_flValue;
@@ -420,7 +461,135 @@ async function fetchPaintDef(paintMaterial: string): Promise<PaintDef | null> {
       return Math.abs(v - (min + max) / 2) < 1e-4 ? seeded : v;
     };
     const t = (n: string) => loose.get(n) ?? tex(n);
+    // Raw authored values, for the Valve reference runner — see PaintDef.params.
+    const params: Record<string, number[]> = {};
+    for (const p of vmatJson?.m_floatParams ?? []) params[p.m_name] = [Number(p.m_flValue)];
+    for (const p of vmatJson?.m_intParams ?? []) params[p.m_name] = [Number(p.m_nValue)];
+    for (const p of vmatJson?.m_vectorParams ?? []) params[p.m_name] = p.m_value.map(Number);
+    for (const [n, lv] of looseVal) {
+      if (!n.startsWith("g_") && !n.startsWith("F_")) continue;
+      if (lv.m_strTextureRuntimeResourcePath != null) continue;
+      const c = lv.m_cValueColor4;
+      if (Array.isArray(c)) {
+        params[n] = c.slice(0, 3).map((x) => Number(x) / 255);
+      } else if (lv.m_bValueBoolean != null && lv.m_bValueBoolean !== "") {
+        params[n] = [int(n, 0)];
+      } else if (lv.m_nValueIntX != null && lv.m_nValueIntX !== "") {
+        params[n] = [int(n, 0)];
+      } else if (lv.m_flValueFloatX != null && lv.m_flValueFloatX !== "") {
+        params[n] = ["X", "Y", "Z", "W"]
+          .map((k) => lv[`m_flValueFloat${k}`])
+          .filter((v) => v != null && v !== "")
+          .map(Number);
+      }
+    }
+    // The vcompmat's own SET_VALUE mutators are what actually pick the static
+    // combo: they set F_* from the skin's exposed switches when the game builds
+    // the material — g_bLegacyPatina=True -> F_PATINA_AGE=0, g_bTrilinear
+    // Projection=0 -> F_CASE_HARDENING_TRILINEAR=0, g_bUsePaintByNumberMasks=0
+    // -> F_USE_ALL_MASKS=0, some halftone skins F_SPRAYPAINT_HALFTONE=1
+    // unconditionally. Taking F_* from the template alone put M4A4 | Full
+    // Throttle on the patina-AGE combo, which tints its stripes copper where the
+    // game (legacy patina) leaves them grey. Evaluated over the albedo and
+    // rough/metal generations in document order; F_ROUGHNESS_MODE and
+    // F_OUTPUT_MODE are per-pass plumbing and skipped.
+    const exposedVal = (n: string): string | undefined => {
+      const lv = looseVal.get(n);
+      if (!lv) return undefined;
+      for (const k of ["m_bValueBoolean", "m_nValueIntX", "m_flValueFloatX"]) {
+        const v = lv[k];
+        if (v != null && v !== "") return String(v);
+      }
+      return undefined;
+    };
+    const truthy = (v: string) => (v === "True" || v === "true" ? "1" : v === "False" || v === "false" ? "0" : v);
+    const sameValue = (a: string | undefined, b: string) => a != null && (truthy(a) === truthy(b) || Number(a) === Number(b));
+    const applyMutators = (o: unknown, inGen: boolean) => {
+      if (!o || typeof o !== "object") return;
+      if (Array.isArray(o)) return o.forEach((x) => applyMutators(x, inGen));
+      const rec = o as Record<string, unknown>;
+      const cmd = rec.m_nMutatorCommandType;
+      if (cmd === "COMP_MAT_PROPERTY_MUTATOR_GENERATE_TEXTURE") {
+        const target = rec.m_strGenerateTexture_TargetParam;
+        return applyMutators(rec.m_vecTexGenInstructions, target === "g_tColor" || target === "g_tMetalness");
+      }
+      if (cmd === "COMP_MAT_PROPERTY_MUTATOR_SET_VALUE" && inGen) {
+        const val = rec.m_nSetValue_Value as Record<string, unknown> | undefined;
+        const name = String(val?.m_strName ?? "");
+        if (!name.startsWith("F_") || name === "F_ROUGHNESS_MODE" || name === "F_OUTPUT_MODE") return;
+        const conds = (rec.m_vecConditions as Record<string, unknown>[] | undefined) ?? [];
+        const pass = conds.every((c) => {
+          const container = c.m_strMutatorConditionContainerName;
+          const varName = String(c.m_strMutatorConditionContainerVarName ?? "");
+          const have = container === "exposed_params" ? exposedVal(varName)
+            : container === "paint" ? (params[varName]?.[0] != null ? String(params[varName][0]) : undefined)
+            : undefined;
+          const eq = sameValue(have, String(c.m_strMutatorConditionContainerVarValue ?? ""));
+          return c.m_bPassWhenTrue === "0" ? !eq : eq;
+        });
+        if (pass && val?.m_nValueIntX != null) params[name] = [Number(val.m_nValueIntX)];
+        return;
+      }
+      for (const v of Object.values(rec)) applyMutators(v, inGen);
+    };
+    applyMutators(comp, false);
+
+    // The seed's draw list, from the vcompmat's own RANDOM_ROLL mutator. Its
+    // first eight entries are the eleven draws seededVisuals already makes
+    // (verified bit-exact against the game); anything after them — the case-
+    // hardening ramp offset and pattern influence, overlay rotation/offset —
+    // continues the SAME stream. Before this was read, the ramp offset was
+    // guessed from a "slider sits at its midpoint" heuristic and pinned to 0,
+    // so every seed of a skin like XM1014 | Solitude got one colour family.
+    // Skins without their own list roll only the standard eleven (the shared
+    // include's list), so extraRolls stays empty for them.
+    const STANDARD_ROLLS = [
+      "g_vPatternTexCoordOffset.xy", "g_flPatternTexCoordRotation.x", "g_flWearTexCoordScale.x",
+      "g_vWearTexCoordOffset.xy", "g_flWearTexCoordRotation.x", "g_flGrungeTexCoordScale.x",
+      "g_vGrungeTexCoordOffset.xy", "g_flGrungeTexCoordRotation.x",
+    ];
+    const extraRolls: { name: string; bounds: [number, number][] }[] = [];
+    walkRolls: {
+      let list: string[] | null = null;
+      const find = (o: unknown) => {
+        if (list || !o || typeof o !== "object") return;
+        if (Array.isArray(o)) return o.forEach(find);
+        const rec = o as Record<string, unknown>;
+        if (
+          rec.m_nMutatorCommandType === "COMP_MAT_PROPERTY_MUTATOR_RANDOM_ROLL_INPUT_VARIABLES" &&
+          rec.m_strRandomRollInputVars_SeedInputVar === "econ_instance.g_nRandomSeed" &&
+          Array.isArray(rec.m_vecRandomRollInputVars_InputVarsToRoll)
+        ) {
+          list = (rec.m_vecRandomRollInputVars_InputVarsToRoll as unknown[]).map(String);
+          return;
+        }
+        Object.values(rec).forEach(find);
+      };
+      find(comp);
+      if (!list) break walkRolls;
+      const bare = (list as string[]).map((v) => v.split(".").slice(1).join("."));
+      if (STANDARD_ROLLS.some((r, i) => bare[i] !== r)) break walkRolls;
+      for (const entry of bare.slice(STANDARD_ROLLS.length)) {
+        const [name, comps = "x"] = entry.split(".");
+        const lv = looseVal.get(name);
+        const bounds = [...comps].map((c): [number, number] => {
+          const k = c.toUpperCase();
+          const v = Number(lv?.[`m_flValueFloat${k}`] ?? 0);
+          const lo = lv?.[`m_flValueFloat${k}_Min`];
+          const hi = lv?.[`m_flValueFloat${k}_Max`];
+          return lo == null || lo === "" || hi == null || hi === "" ? [v, v] : [Number(lo), Number(hi)];
+        });
+        extraRolls.push({ name, bounds });
+      }
+    }
+
+    const textures: Record<string, string> = {};
+    for (const p of vmatJson?.m_textureParams ?? []) textures[p.m_name] = p.m_pValue;
+    for (const [n, path] of loose) textures[n] = path;
     return {
+      params,
+      textures,
+      extraRolls,
       style: int("F_PAINT_STYLE", 0),
       halftone: int("F_SPRAYPAINT_HALFTONE", 0) !== 0,
       // Defaults are the SHADER's own (csgo_customweapon.slang), not the paint
@@ -587,13 +756,14 @@ const flt2 = (v: number[] | undefined, i: number) => (v ? (v[i] ?? 0) : 0);
 //   S_SEPARATE_CHANNEL_INPUTS == 1  ("Separate Channels", the HD/CS2 bodies)
 //     g_tAmbientOcclusion: Channel(R, Cavity) Channel(G, AO) Channel(A, NoPaint)
 //   S_SEPARATE_CHANNEL_INPUTS == 0  ("Pre-packed Source1 Input", legacy bodies)
-//     g_tAmbientOcclusion: Channel(RGBA, AmbientOcclusion) — the Source1 pack,
-//     whose B is cavity and A is noPaint.
-// So cavity moves between B and R. Reading the wrong one is not subtle: the HD
-// cavity texture's B is 0.000 across the ENTIRE map (measured), which zeroes the
-// wear-through signal — the weapon never strips at any float.
+//     g_tAmbientOcclusion: Channel(RGBA, AmbientOcclusion) — the Source1 pack.
+// The packing changes what the shader DOES with R, not which channel it reads:
+// every combo reads cavity from R and noPaint from A (VCS 72 decompile,
+// src/valveCombos). Legacy takes R raw; HD takes pow(R, 1.5) * 0.96 and remaps
+// it again for the wear curve. Legacy B is a crevice-only map the composite
+// never samples — reading it as cavity is what left legacy finishes unworn.
 export interface WeaponInputs {
-  ao?: string; // separateChannels ? R=cavity G=ao A=noPaint : Source1 pack (B=cavity A=noPaint)
+  ao?: string; // R=cavity G=ao A=noPaint, both packings (see above)
   masks?: string; // paint-by-number RGB
   color?: string; // base weapon albedo (paint-UV space)
   metalness?: string; // R=roughness G=metalness
@@ -749,7 +919,7 @@ class UniformRandomStream {
   }
 }
 
-interface SeededVisuals {
+export interface SeededVisuals {
   patternOffsetX: number;
   patternOffsetY: number;
   patternRot: number;
@@ -761,11 +931,14 @@ interface SeededVisuals {
   grungeOffsetX: number;
   grungeOffsetY: number;
   grungeRot: number;
+  /** def.extraRolls, drawn from the same stream after the standard eleven. */
+  extra: Record<string, number[]>;
 }
-// Exact call order from CCSWeaponVisualsDataProcessor::SetVisualsData.
+// Exact call order from CCSWeaponVisualsDataProcessor::SetVisualsData, then
+// whatever the vcompmat's own roll list adds (def.extraRolls).
 export function seededVisuals(def: PaintDef, seed: number): SeededVisuals {
   const rs = new UniformRandomStream(seed);
-  return {
+  const sv: Omit<SeededVisuals, "extra"> = {
     patternOffsetX: rs.randomFloat(def.offsetX[0], def.offsetX[1]),
     patternOffsetY: rs.randomFloat(def.offsetY[0], def.offsetY[1]),
     patternRot: rs.randomFloat(def.rotation[0], def.rotation[1]),
@@ -778,13 +951,16 @@ export function seededVisuals(def: PaintDef, seed: number): SeededVisuals {
     grungeOffsetY: rs.randomFloat(0, 1),
     grungeRot: rs.randomFloat(0, 360),
   };
+  const extra: Record<string, number[]> = {};
+  for (const roll of def.extraRolls ?? []) extra[roll.name] = roll.bounds.map(([lo, hi]) => rs.randomFloat(lo, hi));
+  return { ...sv, extra };
 }
 
 // Valve's texcoord transform, exactly as baked by the vmat Expression:
 // rotate about (0.5, 0.5), scale, then offset; every input quantized to two
 // decimals first (the game writes them through "%.2f").
 const q2 = (x: number) => Math.floor((x + 0.005) * 100) / 100;
-function texXform(rotDeg: number, scale: number, offX: number, offY: number): [number[], number[]] {
+export function texXform(rotDeg: number, scale: number, offX: number, offY: number): [number[], number[]] {
   const r = q2(rotDeg);
   const s = q2(scale) || 1;
   const ox = q2(offX);
@@ -993,18 +1169,18 @@ void main() {
   // multiplies it, so the whole weapon strips at once: 100% at every float.
   // Absent a real map, noPaint must be 0 (paint covers everything) and cavity
   // low, so wear comes only from the wear texture.
-  // Cavity is B, not R. MEASURED against the extracted p90 inputs: R is a soft
-  // AO bake (mean 0.36-0.60) and reading it as cavity pushed the wear signal
-  // over the 0.58 threshold almost immediately — 6% of painted area already
-  // stripped at Factory New, and pinned at ~35% from wear 0.25 all the way to
-  // 0.9, so the wear slider did nothing across most of its range. B is the real
-  // cavity map (mean 0.09, near-zero on flats with only crevices bright, which
-  // is what the note below describes) and yields 0.2% stripped at Factory New
-  // rising smoothly to 27% at Battle-Scarred.
-  // Cavity channel is packing-dependent — see WeaponInputs.separateChannels.
-  // Separate-channel (HD) maps put cavity in R and leave B at 0; pre-packed
-  // Source1 (legacy) maps put it in B.
-  float cavityRaw = uHasAo ? (uSeparateChannels ? ao4.r : ao4.b) : CAVITY_NO_MAP;
+  // Cavity is ao.R in BOTH packings. CONFIRMED by every combo of the VCS 72
+  // decompile (src/valveCombos): the legacy combos (no S_SEPARATE_CHANNEL_INPUTS
+  // — c00001/4/6/8, ...) take _4306 = ao.x raw, the HD ones
+  // pow(ao.x, 1.5) * 0.96.
+  //
+  // This used to read B for legacy inputs, on a measurement that R "strips too
+  // early" — taken with no ground truth to compare against. B is a crevice-only
+  // map that is ~0 on flat panels, so legacy finishes (899 of them) barely wore
+  // at all away from crevices: AK-47 | Asiimov at FT changed 0.6% of its atlas
+  // where Valve's shader changes 20%, and its stock stayed pristine white at
+  // Battle-Scarred while the game strips it to gunmetal.
+  float cavityRaw = uHasAo ? ao4.r : CAVITY_NO_MAP;
   // CONFIRMED (combos 293, 1447 and 1529 all use _4306 = pow(ao.x,1.5)*0.96 as
   // THE cavity for the whole shader — wear curve, grunge blend, patina gate,
   // grime term). We were applying this form only locally inside the
@@ -1197,9 +1373,16 @@ void main() {
   // ak47's cavity of 0.073 is 0.005, against our 0.18. We were stripping ~35x
   // too hard at FN, which is what dragged the AK-47's factory wood-and-metal
   // through AK-47 | Aphrodite's marble.
-  float cavWear = mix(smoothstep(0.0, 0.72, pow(cavity, 1.3)),
-                      smoothstep(0.0, 0.40, cavity),
-                      pow(uWearAmt, 1.2));
+  //
+  // HD ONLY. Both of those combos carry S_SEPARATE_CHANNEL_INPUTS; every legacy
+  // combo (c00001, c00004, c00006, c00008 ...) multiplies by the raw cavity:
+  //   (noPaint + wearTex * ao.x) * (wear * 6 + 1)
+  // Applying the remap to legacy inputs flattened their wear toward crevices.
+  float cavWear = uSeparateChannels
+    ? mix(smoothstep(0.0, 0.72, pow(cavity, 1.3)),
+          smoothstep(0.0, 0.40, cavity),
+          pow(uWearAmt, 1.2))
+    : cavity;
   // The min(noPaint, 1 - masks.r) clamp is style-8 ONLY — combo 293 uses plain
   // noPaint, so this must not be applied to the projected styles.
   float blend = (uStyle == 8 ? min(noPaint, 1.0 - masks.r) : noPaint) + wearTex * cavWear;
@@ -1575,12 +1758,28 @@ void main() {
 // either one above invalidates every stored bake automatically. That is the
 // whole point: the card renders learned the hard way that a hand-bumped version
 // suffix is a version suffix nobody bumps.
-registerCompositeShader(VERT, FRAG);
+// The Valve runtime's epilogue + revision ride along: most composites are now
+// rendered by it, not by FRAG, and a change there must re-bake the store too.
+registerCompositeShader(VERT, FRAG + VALVE_RUNTIME_REV);
 
 // ---- Texture loading ------------------------------------------------------------
 // One shared cache across composites; colorSpace flags follow the shader's
 // SrgbRead() declarations so the GPU linearizes exactly what the game does.
 const texCache = new Map<string, Promise<import("three").Texture | null>>();
+
+/**
+ * Drop cached input textures whose URL `keep` rejects, freeing their GPU copy.
+ * For catalog-wide sweeps only: the cache is session-lifetime by design, which
+ * is right for a viewer and means a sweep over 2000 finishes would otherwise
+ * hold every pattern it ever touched. Weapon inputs are what a sweep reuses.
+ */
+export async function evictPaintTextures(keep: (url: string) => boolean) {
+  for (const [key, p] of [...texCache]) {
+    if (keep(key.split("|")[0])) continue;
+    texCache.delete(key);
+    (await p)?.dispose();
+  }
+}
 
 /** g_tPosition ships as RGBA16161616F, which the extractor hands us as .exr —
  *  TextureLoader cannot read it. Loaded through three's EXRLoader and sampled
@@ -1781,6 +1980,30 @@ export function dropCompositeCache(renderer: import("three").WebGLRenderer) {
 let quadGeom: import("three").BufferGeometry | null = null;
 let quadMat: import("three").RawShaderMaterial | null = null;
 
+/**
+ * Everything a REFERENCE compositor needs to render the same composite we just
+ * rendered, on the same inputs — the Valve parity panel (valveParity.ts) runs
+ * the decompiled shader in oracle mode against this. Test tooling only.
+ *
+ * URLs and loaders rather than our loaded textures, deliberately: the reference
+ * decides colour space and sampler state from Valve's own declarations, so a
+ * texture decoded the wrong way shows up as a difference instead of being
+ * silently shared by both sides.
+ */
+export interface CompositeReferenceCtx extends ValveInputs {
+  renderer: import("three").WebGLRenderer;
+  weapon: WeaponInputs | null | undefined;
+  seed: number;
+  size: number;
+  quad: import("three").BufferGeometry;
+  /** OUR two outputs, already rendered. */
+  albedoRT: import("three").WebGLRenderTarget;
+  rmRT: import("three").WebGLRenderTarget;
+  /** Which compositor produced them. */
+  path: "valve" | "port";
+  makeRT: (srgb: boolean) => import("three").WebGLRenderTarget;
+}
+
 export async function compositePaint(
   three: THREE,
   renderer: import("three").WebGLRenderer,
@@ -1811,6 +2034,15 @@ export async function compositePaint(
      * cannot raise a skin past what its own textures or the device allow.
      */
     maxSize?: number;
+    /** Test tooling: called after our passes render, with everything needed to
+     *  render a reference composite on the same inputs. A composite made this
+     *  way bypasses the LRU and the shared store entirely, and its release()
+     *  frees it outright. */
+    reference?: (ctx: CompositeReferenceCtx) => Promise<void>;
+    /** Test tooling: render with the hand port even where a Valve combo is
+     *  bundled — how the parity panel keeps the fallback honest. Bypasses the
+     *  LRU and the store like `reference`. */
+    forcePort?: boolean;
   },
 ): Promise<CompositeResult | null> {
   const THREE = three;
@@ -1835,7 +2067,7 @@ export async function compositePaint(
   );
   const key = `${def.pattern ?? "-"}|${def.overlay ?? "-"}|${def.style}|${wear.toFixed(4)}|${seed}|${wkey}|d${opts.debug ?? 0}|${def.caseHardening ? `ch${def.caseHardeningRamp ?? "-"}${def.chRampOffset}` : ""}|a${def.patternAddrH}_${def.patternAddrV}|c${sizeCap}`;
   const cache = cacheFor(renderer);
-  const hit = cache.get(key);
+  const hit = opts.reference || opts.forcePort ? undefined : cache.get(key);
   if (hit) {
     hit.refs++;
     // refresh LRU order
@@ -1851,7 +2083,7 @@ export async function compositePaint(
   // A debug pass is a diagnostic render of intermediate values, not the skin —
   // it must never be served from the shared store, nor written to it.
   const storeStem =
-    opts.persist && !opts.debug ? compositeKey({ ...opts.persist, cap: sizeCap }) : null;
+    opts.persist && !opts.debug && !opts.forcePort ? compositeKey({ ...opts.persist, cap: sizeCap }) : null;
   // ?compositeverify=1 renders the skin from scratch even on a hit, so the two
   // can be compared below. Serving the cached pair here would prove nothing.
   if (storeStem && !verifyEnabled()) {
@@ -1963,6 +2195,10 @@ export async function compositePaint(
   if (!pattern && !overlayTex && def.style !== 0 && !def.colors.length) return null;
 
   const sv = seededVisuals(def, seed);
+  // Overlay placement is authored — unless the vcompmat rolls it from the seed,
+  // which a few (AK-47 | Aphrodite) do. See PaintDef.extraRolls.
+  const ovRot = sv.extra.g_flOverlayTexCoordRotation?.[0] ?? def.overlayRot;
+  const ovOff = sv.extra.g_vOverlayTexCoordOffset ?? def.overlayOffset;
   // Spray/anodized-air scale by weapon length; everything else by uvScale.
   const weaponLength = opts.weapon?.weaponLength ?? def.weaponLength;
   const uvScale = opts.weapon?.uvScale ?? def.uvScale;
@@ -2133,9 +2369,9 @@ export async function compositePaint(
   u.uOverlayDurability.value = def.overlayDurability;
   u.uOverlayUv.value = def.overlayUsesUniqueUv ? 2 : def.overlayUsesPatternUv ? 1 : 0;
   {
-    // Overlay placement is authored per-skin, not seeded — the seed pipeline
-    // has no overlay concept, so this uses the vmat constants directly.
-    const ovX = texXform(def.overlayRot, def.overlayScale * sizeScale, def.overlayOffset[0] ?? 0, def.overlayOffset[1] ?? 0);
+    // Overlay placement: the authored constants, or the seeded draw when the
+    // vcompmat rolls it (ovRot / ovOff above).
+    const ovX = texXform(ovRot, def.overlayScale * sizeScale, ovOff[0] ?? 0, ovOff[1] ?? 0);
     u.uOvX0.value.fromArray(ovX[0]);
     u.uOvX1.value.fromArray(ovX[1]);
   }
@@ -2194,9 +2430,9 @@ export async function compositePaint(
   u.tCaseRamp.value = caseRampTex ?? white;
   // Flat default normal => the edge term is a constant, matching the shader.
   u.tPaintNormal.value = paintNormalTex ?? flatNormal;
-  u.uChPat.value = def.chPatternInfluence;
+  u.uChPat.value = sv.extra.g_flCaseHardeningPatternInfluence?.[0] ?? def.chPatternInfluence;
   u.uChGeo.value = def.chGeometricInfluence;
-  u.uChRampOff.value = def.chRampOffset;
+  u.uChRampOff.value = sv.extra.g_flCaseHardeningRampOffset?.[0] ?? def.chRampOffset;
   u.uColorAdjustMode.value = def.colorAdjustmentMode;
 
   const scene = new THREE.Scene();
@@ -2222,15 +2458,71 @@ export async function compositePaint(
     rt.texture.flipY = false;
     return rt;
   };
+  // Inputs for Valve's own compositor (valveReference.ts) — the production
+  // path whenever this finish's combo is bundled. Also handed to the parity
+  // panel's oracle, which renders the same combo raw.
+  const valveInputs: ValveInputs = {
+    THREE,
+    def,
+    wear,
+    xforms: {
+      pattern: patX,
+      wear: wearX,
+      grunge: grgX,
+      overlay: texXform(ovRot, def.overlayScale * sizeScale, ovOff[0] ?? 0, ovOff[1] ?? 0),
+    },
+    patternXformRotated: (deg) =>
+      texXform(sv.patternRot + deg, def.patternScale * patSizeScale, sv.patternOffsetX, sv.patternOffsetY),
+    urls: {
+      pattern: patternUrl, wear: wearUrl, grunge: grungeUrl, masks: masksUrl, ao: aoUrl,
+      color: colorUrl, rm: rmUrl, paintRough: roughTexUrl, paintMetal: metalTexUrl,
+      overlay: overlayUrl, overlayMask: overlayMaskUrl, caseRamp: caseRampUrl,
+      paintNormal: (await urlOf(def.normal)) ?? null, pearlMask: pearlMaskUrl,
+      surface: opts.weapon?.surface ?? null, position: opts.weapon?.position ?? null,
+      ...Object.fromEntries(Object.entries(def.textures).map(([n, path]) => [`tex:${n}`, paintTextureUrl(path)])),
+    },
+    loadTex: (url, o) => loadTex(THREE, url, o),
+    loadExr: (url) => loadExr(THREE, url),
+    magTex,
+    seeded: sv.extra,
+  };
+
   const prevRT = renderer.getRenderTarget();
   const albedoRT = makeRT(true);
-  u.uMode.value = 0;
-  renderer.setRenderTarget(albedoRT);
-  renderer.render(scene, camera);
   const rmRT = makeRT(false);
-  u.uMode.value = 1;
-  renderer.setRenderTarget(rmRT);
-  renderer.render(scene, camera);
+  // Valve's shader first. The port renders only when there is no bundled combo
+  // for this finish, no extracted weapon inputs (the port's fallbacks for those
+  // are tuned; Valve's shader assumes real inputs), a debug pass was asked for
+  // (the rig's probes are port stages), or the combo failed to link.
+  let path: "valve" | "port" = "port";
+  if (!opts.debug && !opts.forcePort && opts.weapon?.ao) {
+    const combo = await loadValveCombo(valveComboId(def, opts.weapon)).catch(() => null);
+    const mats = combo ? await buildValveMaterials(valveInputs, combo, "runtime").catch(() => null) : null;
+    if (mats) {
+      const vscene = new THREE.Scene();
+      const mesh = new THREE.Mesh(quadGeom, mats.albedo);
+      vscene.add(mesh);
+      renderer.setRenderTarget(albedoRT);
+      renderer.render(vscene, camera);
+      mesh.material = mats.rm;
+      renderer.setRenderTarget(rmRT);
+      renderer.render(vscene, camera);
+      if (programFailed(renderer, mats.albedo) || programFailed(renderer, mats.rm)) {
+        console.warn(`[paint] Valve combo ${mats.comboId} failed to link — rendering ${modelKey} with the port`);
+      } else {
+        path = "valve";
+      }
+      mats.dispose();
+    }
+  }
+  if (path === "port") {
+    u.uMode.value = 0;
+    renderer.setRenderTarget(albedoRT);
+    renderer.render(scene, camera);
+    u.uMode.value = 1;
+    renderer.setRenderTarget(rmRT);
+    renderer.render(scene, camera);
+  }
   let debugRT: import("three").WebGLRenderTarget | null = null;
   if (opts.debug) {
     debugRT = makeRT(true);
@@ -2281,6 +2573,28 @@ export async function compositePaint(
     if (verifyEnabled()) void verifyStoredComposite(renderer, req);
     else if (opts.persistWrite) storeComposite(renderer, req);
   }
+
+  if (opts.reference) {
+    try {
+      await opts.reference({
+        ...valveInputs,
+        renderer,
+        weapon: opts.weapon,
+        seed,
+        size,
+        quad: quadGeom!,
+        albedoRT,
+        rmRT,
+        path,
+        makeRT,
+      });
+    } finally {
+      renderer.setRenderTarget(prevRT);
+    }
+    return { albedo: albedoRT.texture, rm: rmRT.texture, debug: debugRT?.texture, incomplete, release: dispose };
+  }
+  // A forced port render must never be served to a normal request.
+  if (opts.forcePort) return { albedo: albedoRT.texture, rm: rmRT.texture, debug: debugRT?.texture, incomplete, release: dispose };
 
   const entry: CacheEntry = {
     result: { albedo: albedoRT.texture, rm: rmRT.texture, debug: debugRT?.texture, incomplete },
