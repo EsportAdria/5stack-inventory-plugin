@@ -142,7 +142,7 @@ import {
 import {
   DEFAULT_WEAR, POSITION_GROUPS, START_PISTOLS, isWeaponPos, isSpecial, isShared, isNo3d,
   type OriginFilter, ORIGIN_FILTERS, ORIGIN_VALUES, WEAPON_GROUPS, GEAR_TYPES,
-  matchesOrigin, catsForPos, DEFAULTS, RAIL, EXTRAS, ALL_SPECIALS, sortPreview,
+  matchesOrigin, catsForPos, DEFAULTS, resolveGrid, RAIL, EXTRAS, ALL_SPECIALS, sortPreview,
 } from "./loadoutModel";
 import { useSortControl } from "./composables/useSortControl";
 import { SWIPE_ARM_PX } from "./composables/useSwipeDismiss";
@@ -427,10 +427,23 @@ function rowFor(pos: string, t: Team = team.value): LoadoutEntry | undefined {
   return loadoutMap.value.get(`${t}:${pos}`);
 }
 const weaponByModel = computed(() => new Map(weapons.value.map((w) => [w.model, w])));
+// Every grid position's gun per team, defaults included. The same resolver
+// /api/equipped/v5 sends the game server, so a default you displaced by
+// placing its gun elsewhere moves over instead of showing twice.
+const gridModels = computed(() => {
+  const forTeam = (t: Team) => {
+    const picks: Record<string, string | undefined> = {};
+    for (const g of POSITION_GROUPS) {
+      for (const p of g.positions) picks[p] = loadoutMap.value.get(`${t}:${p}`)?.item?.model;
+    }
+    return resolveGrid(t, picks);
+  };
+  return { CT: forTeam("CT"), T: forTeam("T") };
+});
 // The weapon model occupying a position (equipped row wins, else team default).
 function occupantModel(pos: string, t: Team = team.value): string {
   const row = rowFor(pos, t);
-  return row?.item?.model ?? DEFAULTS[t][pos] ?? pos;
+  return row?.item?.model ?? gridModels.value[t][pos] ?? DEFAULTS[t][pos] ?? pos;
 }
 function occupantWeapon(pos: string): CatalogWeapon | undefined {
   return weaponByModel.value.get(occupantModel(pos));

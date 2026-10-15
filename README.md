@@ -329,8 +329,19 @@ failure modes rather than cosmetic mismatches:
   consumable (50 sprays, then the item is gone); a missing `charges` is the
   plugin's "unlimited", which is what a loadout sandbox wants. That is also why
   there is no `/api/consume-item-spray` here.
+- **`loadout`** (`{ team: { loadout_slot_t: weaponDef } }`) replaces the
+  player's gun slots with the grid. Without it the plugin keeps the player's own
+  CS2 loadout and swaps skins in by def alone, so a skin on a gun that loadout
+  doesn't carry (an M4A1-S for someone on the M4A4, an R8, a CZ) never showed
+  ([cs2-ss2-inventory-simulator#60][invsim-loadout]). A team the player has set
+  up here (any grid row, skin or free default) goes out whole: all 15 positions
+  (`sp`/`p1-p4` → 2-6, `m1-m5` → 8-12, `r1-r5` → 14-18), with empty ones filled
+  from Valve's defaults in `backend/src/loadoutGrid.ts`, the same table the
+  panel draws empty cells from. A team they never touched is left out and keeps
+  their own CS2 loadout. Servers can opt out with `invsim_loadout_enabled 0`.
 
 [invsim]: https://github.com/ianlucas/cs2-ss2-inventory-simulator
+[invsim-loadout]: https://github.com/ianlucas/cs2-ss2-inventory-simulator/pull/60
 [invsim-css]: https://github.com/ianlucas/cs2-css-inventory-simulator
 [invsim-pets]: https://github.com/ianlucas/cs2-css-inventory-simulator/pull/150
 [authdocs]: https://docs.5stack.gg/plugins/backend#optional-forward-auth-at-the-ingress

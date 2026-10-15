@@ -36,6 +36,7 @@ import {
   getPatchMaterials,
 } from "./stickerMarkup.ts";
 import { patchSlotsFor, warmPatchSlots } from "./agentPatchSlots.ts";
+import { GRID_SLOT_IDS, GRID_SLOTS, resolveGrid } from "./loadoutGrid.ts";
 import {
   itemDescription,
   itemTitle,
@@ -6492,6 +6493,8 @@ app.post("/api/admin/game-config", async (request, reply) => {
 // design (game servers can't do Steam forward-auth), same as upstream.
 
 const TEAM_BYTE: Record<string, string> = { T: "2", CT: "3" };
+// Base weapon def by model, for the grid defaults `loadout` names by model.
+const WEAPON_DEF_BY_MODEL = new Map(getWeapons().map((w) => [w.model, w.def as number]));
 
 /**
  * One entry in the v5 feed. Field-for-field the shape upstream documents in
@@ -6586,9 +6589,13 @@ app.get<{ Params: { steamId: string } }>("/api/equipped/v5/:steamId", async (req
   if (!/^\d{17}$/.test(steamId)) {
     return reply.status(400).send({ error: "invalid steam id" });
   }
+  // LEFT JOIN: a free default weapon (item_id, no instance) has nothing to
+  // skin, but it still says which gun sits in its position — `loadout` below
+  // needs it. Only rows with an instance become item entries.
   const { rows } = await pool.query<{
     team: string;
     slot: string;
+    base_item_id: number | null;
     uid: string | null;
     item_id: number | null;
     wear: number | null;
@@ -6603,18 +6610,18 @@ app.get<{ Params: { steamId: string } }>("/api/equipped/v5/:steamId", async (req
     charm_id: number | null;
     charm_offset: { x?: number; y?: number; z?: number; seed?: number } | null;
   }>(
-    `SELECT l.team, l.slot, i.id AS uid, i.item_id, i.wear, i.seed, i.stattrak,
+    `SELECT l.team, l.slot, l.item_id AS base_item_id, i.id AS uid, i.item_id, i.wear, i.seed, i.stattrak,
             i.stattrak_count, i.nametag, i.style, i.upgrade_level,
             i.stickers, i.patches, i.charm_id, i.charm_offset
      FROM inventory.loadout l
-     JOIN inventory.owned_items i ON i.id = l.item_instance_id
+     LEFT JOIN inventory.owned_items i ON i.id = l.item_instance_id
      WHERE l.steam_id = $1`,
     [steamId],
   );
   // THE feed the CS2 server applies, so the link has to be dereferenced here of
   // all places — an unresolved spec would send the game the stale inline
   // scratch while every screen in the panel showed the sticker's real one.
-  const equippedRows = await withAttachments(steamId, rows);
+  const equippedRows = await withAttachments(steamId, rows.filter((r) => r.uid != null));
 
   const out = {
     agents: {} as Record<string, EquippedItem>,
@@ -6738,7 +6745,35 @@ app.get<{ Params: { steamId: string } }>("/api/equipped/v5/:steamId", async (req
       bucket[String(item.def)] = entry;
     }
   }
-  return out;
+
+  // Which gun sits in each of the 15 weapon positions, per team, as
+  // `loadout_slot_t -> weapon def` (cs2-ss2-inventory-simulator#60). Without it
+  // the plugin keeps the player's own CS2 loadout and swaps skins in by def
+  // alone, so a skin on a gun that loadout doesn't carry — an M4A1-S for someone
+  // on the M4A4, an R8, a CZ — never showed.
+  //
+  // A team the player has arranged here (any grid row, skin or free default) is
+  // sent WHOLE, defaults included, so the buy menu is exactly the grid the panel
+  // draws and no gun can turn up twice. A team they never touched is left out
+  // entirely and keeps their own CS2 loadout, so nobody joins a match with a
+  // default loadout forced on them.
+  const loadout: Record<string, Record<string, number>> = {};
+  for (const team of ["CT", "T"] as const) {
+    const picks: Record<string, string | undefined> = {};
+    for (const row of rows) {
+      const id = row.item_id ?? row.base_item_id;
+      if (row.team !== team || !GRID_SLOTS.includes(row.slot) || id == null) continue;
+      picks[row.slot] = getItem(id)?.model as string | undefined;
+    }
+    if (!Object.values(picks).some(Boolean)) continue;
+    const slots: Record<string, number> = {};
+    for (const [slot, model] of Object.entries(resolveGrid(team, picks))) {
+      const def = WEAPON_DEF_BY_MODEL.get(model);
+      if (def != null) slots[String(GRID_SLOT_IDS[slot])] = def;
+    }
+    loadout[TEAM_BYTE[team]] = slots;
+  }
+  return Object.keys(loadout).length ? { ...out, loadout } : out;
 });
 
 // StatTrak kill counting from the game server. Guarded by the panel-generated
