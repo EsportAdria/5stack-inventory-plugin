@@ -33,10 +33,11 @@ COPY backend/ ./
 # had no clips, no sounds and no flash. /app/scripts is also where dev sync puts
 # it, so main.ts resolves one path for both.
 #
-# tools/ is NOT copied whole: tools/shadertest is ~700MB of rig. Only the two
-# modules the extractor imports.
+# tools/ is NOT copied whole: tools/shadertest is ~700MB of rig. Only the
+# modules the extractor imports — and every new one has to be added HERE, or the
+# step dies on import exactly as above (nmclip-data.mjs, v33).
 COPY scripts/ /app/scripts/
-COPY tools/nmclip.mjs tools/dmx.mjs /app/tools/
+COPY tools/nmclip.mjs tools/dmx.mjs tools/nmclip-data.mjs /app/tools/
 RUN chmod +x /app/scripts/extract-models.sh
 EXPOSE 3000
 CMD ["npm", "start"]

@@ -303,7 +303,7 @@ export const NUMBERS: DevNumber[] = [
   {
     name: "fpvz",
     label: "Viewmodel offset Z",
-    hint: "Moves the eye along its own view axis, in metres. Forward (+) is the safe direction: the arms are cut at the shoulder, and pulling BACK drags those cuts into shot.",
+    hint: "Moves the eye along its own view axis, in metres. Forward (+) is the safe direction: the arms are cut at the shoulder, and pulling BACK drags those cuts into shot. Knives ignore it and keep the clip's own eye (see fpvKnife in viewer3d.ts).",
     dflt: 0.12, min: -1.5, max: 1.5, step: 0.01,
     group: "3D viewer", audience: "developer",
   },
@@ -324,14 +324,14 @@ export const NUMBERS: DevNumber[] = [
   {
     name: "fpvshiftx",
     label: "Viewmodel frame X",
-    hint: "Slides the whole first-person PICTURE across its frame, as a fraction of the frame's width. Positive moves the weapon right. This moves the image, not the eye — the pose, the perspective and the scale are untouched, which is why it is the dial for composition and the offsets above are the dials for the pose.",
+    hint: "Slides the whole first-person PICTURE across its frame, as a fraction of the frame's width. Positive moves the weapon right. This moves the image, not the eye — the pose, the perspective and the scale are untouched, which is why it is the dial for composition and the offsets above are the dials for the pose. Knives ignore it and stay centred (see fpvKnife in viewer3d.ts).",
     dflt: 0.1, min: -0.5, max: 0.5, step: 0.01,
     group: "3D viewer", audience: "developer",
   },
   {
     name: "fpvshifty",
     label: "Viewmodel frame Y",
-    hint: "Slides the first-person picture down (+) or up (-) its frame, as a fraction of the frame's height. Down is what seats the weapon in the corner instead of leaving it floating mid-air.",
+    hint: "Slides the first-person picture down (+) or up (-) its frame, as a fraction of the frame's height. Down is what seats the weapon in the corner instead of leaving it floating mid-air. Knives ignore it (see fpvKnife in viewer3d.ts).",
     dflt: 0.12, min: -0.5, max: 0.5, step: 0.01,
     group: "3D viewer", audience: "developer",
   },

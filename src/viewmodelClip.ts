@@ -53,6 +53,19 @@ export interface RawClip {
    *  the trigger keeps firing — both from scripts/weapons.vdata. */
   cycle?: number;
   auto?: boolean;
+  /**
+   * The WEAPON's own skeleton, as the same clip animates it — `weapon_offset`
+   * and the moving parts, in the weapon GLB's bone-local space (inches, like
+   * every other track). On a knife this is the blade's facing in the fist and
+   * the whole of a butterfly's flip; see buildPropClip. Absent on an older
+   * extraction.
+   */
+  prop?: {
+    /** `weapons/<name>` — which prop skeleton these tracks were authored on. */
+    skeleton: string;
+    bones: Record<string, { rot?: RawTrack; pos?: RawTrack }>;
+    parents?: Record<string, string>;
+  };
 }
 
 export interface ViewmodelClip {
@@ -89,8 +102,15 @@ const cache = new Map<string, Promise<RawClip | null>>();
  * 4 — `sounds` cues on each action; sfx/ and fx/ assets alongside.
  * 5 — sound files keep their shipped format (.wav/.mp3, named in the cue);
  *     fire clips carry `cycle`/`auto` from scripts/weapons.vdata.
+ * 6 — `prop`: the weapon's own skeleton tracks (tools/nmclip-data.mjs).
+ * 7 — no shape change: a RE-KEY. 6 went live before the files carrying `prop`
+ *     were on the mount, and a `?v=` URL is served immutable for a year
+ *     (nginx.conf) — so every browser that opened a knife in that window
+ *     pinned the OLD shape under the NEW key, and its inspect played with the
+ *     knife frozen while a fresh fetch of the same URL had the tracks. Bump this
+ *     only once the data it describes is already on the mount.
  */
-const CLIP_SCHEMA = 5;
+const CLIP_SCHEMA = 7;
 
 /**
  * A URL under the viewmodel asset tree — clips, their sounds, the effect
@@ -138,6 +158,14 @@ export function loadViewmodelClip(model: string, action: ClipAction = "idle"): P
   const p = fetch(clipUrl(model, action))
     .then((r) => (r.ok ? (r.json() as Promise<RawClip>) : null))
     .catch(() => null)
+    // NO IDLE IS NOT NO FIRST PERSON. Idle is what the mount asks for, so a
+    // missing one dropped the weapon onto the clipless fallback, which frames a
+    // different rig — every knife opened looking at an empty room with the
+    // blade clipped into a corner, because extractions before the `idle1_` fix
+    // wrote no knife idle at all. A draw ENDS at the ready pose (measured
+    // against the real idles: wpn identical, arms within 2°), so its last frame
+    // is the idle in everything but the breathing.
+    .then((v) => v ?? (action === "idle" ? loadViewmodelClip(model, "draw").then((d) => d && finalPose(d)) : null))
     // A failed fetch is not cached as a permanent no: a 404 while an extraction
     // is mid-run would otherwise pin this weapon to "no animation" for the rest
     // of the session.
@@ -147,6 +175,65 @@ export function loadViewmodelClip(model: string, action: ClipAction = "idle"): P
     });
   cache.set(key, p);
   return p;
+}
+
+/**
+ * A clip's LAST frame as a still clip of its own — zero duration, every track
+ * constant, no sounds — which the rig holds exactly as it holds a real idle.
+ */
+function finalPose(raw: RawClip): RawClip {
+  const last = (t: RawTrack | undefined, width: number): RawTrack | undefined =>
+    t && { v: t.t ? t.v.slice(-width) : t.v.slice(0, width) };
+  const still = (from: RawClip["bones"]) => {
+    const bones: RawClip["bones"] = {};
+    for (const [bone, tr] of Object.entries(from)) bones[bone] = { rot: last(tr.rot, 4), pos: last(tr.pos, 3) };
+    return bones;
+  };
+  return {
+    source: `${raw.source}#end`,
+    duration: 0,
+    parents: raw.parents,
+    bones: still(raw.bones),
+    // The knife's own pose rides along — a draw ends with the blade where the
+    // idle holds it, and that is half of what the fallback is for.
+    ...(raw.prop ? { prop: { ...raw.prop, bones: still(raw.prop.bones) } } : {}),
+  };
+}
+
+/**
+ * The weapon's own skeleton tracks as a clip for the WEAPON's mixer.
+ *
+ * Same track format and the same clock as the arm clip (the extractor keys
+ * both on the DMX's frame times), so the two can be started together and stay
+ * locked without any time-scaling. `weapon` is left out: it is the attachment
+ * root, and the seat already puts it on the clip's `wpn` (see fpvUnbake) — the
+ * prop skeleton states it at its own origin, and taking that track would move
+ * the bone the seat was measured against. Bones the GLB has no node for are
+ * skipped rather than handed to three to warn about.
+ *
+ * Null when the clip carries no prop tracks (an older extraction) or none of
+ * them land on this model.
+ */
+export function buildPropClip(
+  THREE: typeof import("three"),
+  raw: RawClip,
+  has: (bone: string) => boolean,
+): import("three").AnimationClip | null {
+  if (!raw.prop) return null;
+  const tracks: import("three").KeyframeTrack[] = [];
+  for (const [bone, tr] of Object.entries(raw.prop.bones)) {
+    if (bone === "weapon" || !has(bone)) continue;
+    if (tr.rot) {
+      const times = tr.rot.t ?? [0];
+      tracks.push(new THREE.QuaternionKeyframeTrack(`${bone}.quaternion`, times, tr.rot.t ? tr.rot.v : tr.rot.v.slice(0, 4)));
+    }
+    if (tr.pos) {
+      const times = tr.pos.t ?? [0];
+      tracks.push(new THREE.VectorKeyframeTrack(`${bone}.position`, times, tr.pos.t ? tr.pos.v : tr.pos.v.slice(0, 3)));
+    }
+  }
+  if (!tracks.length) return null;
+  return new THREE.AnimationClip(`prop:${raw.source.replace(/^.*\//, "")}`, raw.duration, tracks);
 }
 
 /**
