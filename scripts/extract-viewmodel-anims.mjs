@@ -31,6 +31,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { compactTrack as compact, readClip } from "../tools/nmclip.mjs";
+import { compiledPath, decodeClip, parseKv3Text, readSkeleton } from "../tools/nmclip-data.mjs";
 
 const arg = (name, dflt) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -95,9 +96,15 @@ const NOT_THE_LOOP = /_(draw|transfix|lgcy)_|_lgcy\./;
  *
  * `fire` is `shoot1_*` rather than `shoot_*`: the numbered one is the primary
  * shot, and the unnumbered name does not exist in this tree.
+ *
+ * `idle1_*` IS AN IDLE TOO. Every knife but the two defaults (and the g3sg1,
+ * m249) numbers its resting clip — `idle1_butterfly`, never `idle_butterfly` —
+ * and matching only `idle_` left all twenty knives with no idle. Since idle is
+ * the default action, that was every knife opening in first person on the
+ * clipless fallback, looking the wrong way. `idle2_*` is the fidget, not rest.
  */
 const ACTIONS = [
-  { key: "idle", match: (f) => /\/idle_/.test(f) },
+  { key: "idle", match: (f) => /\/idle1?_/.test(f) },
   { key: "inspect", match: (f) => f.includes("/lookat01_") && !NOT_THE_LOOP.test(f) },
   { key: "draw", match: (f) => /\/draw_/.test(f) },
   { key: "reload", match: (f) => /\/reload_/.test(f) },
@@ -125,13 +132,21 @@ function vpkList() {
  * prefix, but `pistol_glock18` ships `lookat01_glock` and `pistol_hkp2000`
  * ships `lookat01_hkp` — so a rule would quietly miss two weapons and a table
  * of suffixes would be one more thing to keep in step with Valve.
+ *
+ * THE PLAINEST MATCH WINS, not the first. A folder holds variants that share
+ * an action's prefix — `idle_from_activity_negev` (an ADDITIVE transition),
+ * `reload_empty_glock`, `draw_2_revolver` — and the VPK lists them
+ * alphabetically, so "first" handed m249 and negev a transition as their idle
+ * and five pistols the empty-mag reload, whose length does not match the
+ * weapon GLB's own `reload` (glock 2.23s arms vs 1.80s parts). The plain clip
+ * is the shortest name; `+non_additive` duplicates are never the one.
  */
 function actionsIn(clips, folder) {
   const prefix = `animation/anims/viewmodel/${folder}/`;
-  const here = clips.filter((c) => c.startsWith(prefix));
+  const here = clips.filter((c) => c.startsWith(prefix) && !c.includes("+"));
   const out = {};
   for (const a of ACTIONS) {
-    const hit = here.find((c) => a.match(c));
+    const hit = here.filter((c) => a.match(c)).sort((x, y) => x.length - y.length)[0];
     if (hit) out[a.key] = hit;
   }
   return out;
@@ -175,6 +190,58 @@ const SOUND = {
 };
 /** Knives share one folder, and have no shot. */
 const KNIFE_SOUND = { dir: "knife", fire: null, draw: "knife_deploy1", inspect: "knife_inspect_turn_01" };
+
+/** A resource's DATA block as parsed KV3 — see tools/nmclip-data.mjs. */
+function dataBlock(vpkPath) {
+  const text = execFileSync(CLI, ["-i", VPK, "--vpk_filepath", vpkPath, "-b", "DATA"], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return parseKv3Text(text);
+}
+
+const PROP_SKELETONS = new Map();
+/**
+ * THE WEAPON'S OWN SKELETON, as the clip animates it.
+ *
+ * A viewmodel clip drives two skeletons and the decompiled DMX carries only the
+ * arms — see tools/nmclip-data.mjs. The second is the weapon's prop skeleton,
+ * and on a knife it is not a detail: the butterfly's idle turns
+ * `weapon_offset` 125 degrees (the blade's facing in the fist) and its inspect
+ * swings `blade`/`rear`/`lock` through 180 (the flips); the karambit's inspect
+ * spins `weapon_offset` 175. Without these a knife sat at its bind orientation
+ * and every knife inspect played with the knife frozen. On a gun they are
+ * identity for `weapon`/`weapon_offset` (measured, AK), which is why guns
+ * always looked right.
+ *
+ * Keyed on the PRIMARY clip's frame times, so the two track sets stay on one
+ * clock: the DMX spaces frames at frames/duration, and these follow it.
+ */
+function propTracks(clipPath, primary) {
+  const data = dataBlock(clipPath);
+  const sec = data.m_secondaryAnimations?.[0];
+  if (!sec?.m_skeleton) return null;
+  const skelPath = compiledPath(sec.m_skeleton);
+  let skel = PROP_SKELETONS.get(skelPath);
+  if (!skel) {
+    skel = readSkeleton(dataBlock(skelPath));
+    PROP_SKELETONS.set(skelPath, skel);
+  }
+  const decoded = decodeClip(sec, skel.names);
+  const frames = decoded.frames;
+  // The DMX's own rate (VRF writes frames/duration), not the clip's spacing,
+  // so frame f lands on the same time as the arms' frame f.
+  const rate = primary.frameRate || frames / Math.max(1e-6, decoded.duration);
+  const times = Array.from({ length: frames }, (_, f) => f / rate);
+  const bones = {};
+  for (const [name, tr] of Object.entries(decoded.bones)) {
+    const rot = compact({ times, values: tr.rot.values }, 1e-4);
+    const pos = compact({ times, values: tr.pos.values }, 1e-3);
+    if (rot || pos) bones[name] = { ...(rot ? { rot } : {}), ...(pos ? { pos } : {}) };
+  }
+  return { skeleton: sec.m_skeleton.replace(/^animation\/skeletons\//, "").replace(/\.vnmskel$/, ""), bones, parents: skel.parents };
+}
 
 /**
  * The clip's own sound cues, from the .vnmclip the CLI writes beside the DMX.
@@ -493,7 +560,15 @@ function main() {
           const pos = compact(tr.pos, 1e-3);
           if (rot || pos) bones[name] = { ...(rot ? { rot } : {}), ...(pos ? { pos } : {}) };
         }
-        pending.push({ action, clipPath, duration: clip.duration, parents: clip.parents, bones, cues });
+        // The weapon's own skeleton — see propTracks. Never fatal: a clip whose
+        // second track set will not decode still has its arms.
+        let prop = null;
+        try {
+          prop = propTracks(clipPath, clip);
+        } catch (e) {
+          console.warn(`  ${stem.padEnd(24)} ${action} prop FAILED ${e.message}`);
+        }
+        pending.push({ action, clipPath, duration: clip.duration, parents: clip.parents, bones, cues, prop });
         got.push(`${action} ${clip.duration.toFixed(1)}s`);
       } catch (e) {
         console.warn(`  ${stem.padEnd(24)} ${action} FAILED ${e.message}`);
@@ -514,7 +589,7 @@ function main() {
     }
     for (const p of pending) {
       const sounds = p.cues.filter((c) => ext.has(c.file)).map((c) => ({ t: c.t, file: `${c.file}.${ext.get(c.file)}` }));
-      const json = { source: p.clipPath, duration: p.duration, parents: p.parents, bones: p.bones, sounds };
+      const json = { source: p.clipPath, duration: p.duration, parents: p.parents, bones: p.bones, sounds, ...(p.prop ? { prop: p.prop } : {}) };
       if (p.action === "fire") {
         const wd = weaponData.get(`weapon_${stem}`);
         if (wd) {

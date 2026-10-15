@@ -239,6 +239,20 @@ set -euo pipefail
 # texture channels and csgo_weapon.vfx does not use them raw: Charm | Sasquatch
 # authors its eyes metalness 1 but declares g_vMetalnessRemapRange [0, 0.5], and
 # its roughness channel (max 0.51) is scaled by brightness 1.9 / contrast 0.7.
+# v33 (2026-10-15): KNIVES IN FIRST PERSON (step viewmodel-anims only). Each
+# viewmodel clip now carries `prop` — the weapon's OWN skeleton tracks, decoded
+# from the clip's m_secondaryAnimations by tools/nmclip-data.mjs, because the
+# CLI's DMX holds only the arms. On a knife that is the blade's facing in the
+# fist (butterfly `weapon_offset` 125 degrees) and the whole inspect (the flip,
+# the karambit spin); without it knives sat at bind and inspects froze. Also
+# picks `idle1_*` as an idle — 20 knives and the g3sg1 had none — and the
+# plainest clip of each action, so m249/negev stop idling on an additive
+# transition and five pistols + scar20 stop reloading with the empty-mag clip.
+# The image must ship tools/nmclip-data.mjs (Dockerfile.backend) or this step
+# fails on import, non-fatally — v30 all over again. Nothing here changes a
+# card, but the bump re-bakes them all anyway (the card key IS this number) and
+# runs the whole pipeline — it is still the only way an instance re-runs the
+# step on its own.
 # v32 (2026-10-03): PETS (new step pet-models -> models/models/chicken/,
 # models/pets/, models/pet-styles.json), and the cs2-lib 9.4.0 -> 9.5.0 bump the
 # v31 note asks for. The econ schema has a flat icon for ONE of the five pets
@@ -276,7 +290,7 @@ set -euo pipefail
 # so resolving the model from the item's image name found nothing for them and
 # they rendered as flat art. The named materials ride the paint chain, so their
 # textures land alongside every other one.
-EXTRACT_VERSION=32
+EXTRACT_VERSION=33
 
 # Default is the node's CS2 dedicated-server install — the same tree the
 # game-server pods mount, present on every 5stack game node. Its root IS the

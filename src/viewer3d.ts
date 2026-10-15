@@ -16,7 +16,7 @@
 // paintComposite.ts for the shader and its provenance.
 import { API_ORIGIN, getAssetOrigin, withAssetVersion } from "./api";
 import { buildArms, buildTwistSolver, weaponSeat, type ArmsRig, type Hand, type TwistSolver } from "./viewerArms";
-import { buildViewmodelClip, loadViewmodelClip, viewmodelAssetUrl, type ClipAction, type ClipCue } from "./viewmodelClip";
+import { buildPropClip, buildViewmodelClip, loadViewmodelClip, viewmodelAssetUrl, type ClipAction, type ClipCue } from "./viewmodelClip";
 import { buildMuzzleFlash, type MuzzleFlash } from "./muzzleFlash";
 import { CHOICES, FLAGS, NUMBERS, choicesVersion, choiceValue, flagValue, flagsVersion, numberValue, numbersVersion, setChoice, setFlag, setNumber } from "./devFlags";
 import { BAKE_ENVIRONMENT, viewerEnvironment } from "./viewerEnvironments";
@@ -10588,6 +10588,21 @@ async function buildViewer(
     }
     nametagMod = mod;
     nametagPicked = picked;
+    // FIRST PERSON MOVES THE BONES, so the plate has to ride one. It is placed
+    // against the skeleton at BIND (first person never poses it — see the
+    // poseClip branch) and added to `object`, which is right for the item view,
+    // where nothing moves. Held, a knife's prop tracks turn `weapon_offset` and
+    // flip the butterfly's `rear` — the bone this plate is authored on — and a
+    // plate left on `object` would hang in the air where the handle used to be.
+    // `attach` keeps its world transform, so at the moment of the swap nothing
+    // moves; from then on it follows the part.
+    if (fpvSpec && picked.bone) {
+      const b = object.getObjectByName(picked.bone);
+      if (b) {
+        object.updateMatrixWorld(true);
+        b.attach(mod);
+      }
+    }
     // Probes, in the CODE so they survive a reload: ?nameplateprobe=1
     if (debugFlag("nameplateprobe")) {
       const S = 0.0254;
@@ -10612,7 +10627,8 @@ async function buildViewer(
 
   function removeNameTag() {
     if (nametagMod) {
-      object.remove(nametagMod);
+      // Its parent is a bone in first person — see mountNameTag.
+      nametagMod.removeFromParent();
       nametagMod = null;
       nametagPicked = null;
     }
@@ -10775,6 +10791,14 @@ async function buildViewer(
   /** The weapon's own PARTS — mag, bolt, trigger — see the FPV block. */
   let weaponMixer: import("three").AnimationMixer | null = null;
   const weaponActions = new Map<ClipAction, import("three").AnimationAction>();
+  /**
+   * A KNIFE's own skeleton, driven from the viewmodel clip — `weapon_offset`
+   * (the blade's facing in the fist) and the parts (a butterfly's flip). See
+   * buildPropClip. `propRest` holds the idle's pose; `propNow` is the action
+   * crossing over it, kept in step with the arms by playProp.
+   */
+  let propRest: import("three").AnimationAction | null = null;
+  let propNow: import("three").AnimationAction | null = null;
   /** Crossfade for the parts on the way back to rest, matched to the rig's. */
   const PARTS_FADE = 0.12;
   let flash: MuzzleFlash | null = null;
@@ -10793,6 +10817,22 @@ async function buildViewer(
   const FPV_RIGHT = new THREE.Vector3(0, 0, 1);
   /** Viewmodels are composed for a 16:9 screen. See the camera build. */
   const FPV_ASPECT = 16 / 9;
+  /**
+   * KNIVES KEEP THE CLIP'S OWN EYE — no forward push, no corner shift.
+   *
+   * The shipped pose was dialled in on rifles: the eye 12cm ahead of where the
+   * clip puts it (`fpvz`) and the picture slid toward the bottom-right corner
+   * (`fpvshiftx/y`). A rifle survives both because its barrel runs most of a
+   * metre out toward the centre of the frame. A knife is the opposite shape —
+   * held lower, 30cm long, blade pointing UP and back toward the eye — so the
+   * push left the butterfly's tip 16cm from the camera and 49 degrees right
+   * (`wpnTip` at NDC x 1.55 on a 1.1-aspect pane: the blade simply not in
+   * view), and the shift alone still carried it to 1.07. At the clip's origin
+   * with a centred frame it sits in the fist, blade up, tip at x 0.87 — CS2's
+   * knife idle. Yaw, pitch and the small x/y offsets still apply. Same stems
+   * the extractor files under the knife family.
+   */
+  const fpvKnife = /^(knife|bayonet)/.test(model);
   const fpvTune = new THREE.Quaternion();
   const fpvEuler = new THREE.Euler();
   /**
@@ -10893,6 +10933,21 @@ async function buildViewer(
           // the parts should settle with the hands, not before them.
           a.clampWhenFinished = true;
           weaponActions.set(action, a);
+        }
+        // KNIVES ONLY. A gun's parts come from its GLB's own clips above, and
+        // its `weapon_offset` is identity in every clip measured — so the prop
+        // tracks would only duplicate what already plays. A knife has neither:
+        // no part clips, and a `weapon_offset` that turns the blade 125 degrees
+        // (butterfly idle). Without this it sat at bind, facing the wrong way.
+        if (fpvKnife && vm) {
+          const restClip = buildPropClip(THREE as unknown as typeof import("three"), vm, (b) => !!object.getObjectByName(b));
+          if (restClip) {
+            propRest = weaponMixer.clipAction(restClip);
+            propRest.play();
+            // A still (zero-length) clip must not advance — see viewerArms' rest.
+            propRest.paused = restClip.duration === 0;
+            weaponMixer.update(0);
+          }
         }
         // The flash rides the clip's own muzzle bone.
         const tipBone = rig.root.getObjectByName("wpnTip");
@@ -11257,7 +11312,7 @@ async function buildViewer(
       // Not fitting the whole weapon is the correct behaviour, not a
       // compromise: CS2 doesn't, and neither does skincraft — their AUG's stock
       // runs off the bottom edge exactly like this.
-      .addScaledVector(FPV_FORWARD, (base?.z ?? 0) + debugNumber("fpvz", 0));
+      .addScaledVector(FPV_FORWARD, (base?.z ?? 0) + (fpvKnife ? 0 : debugNumber("fpvz", 0)));
     if (fpvHud) {
       const n = (v: number, d = 2) => v.toFixed(d);
       // One line, space-separated `name=value` — the shape the dials take AND a
@@ -11277,7 +11332,10 @@ async function buildViewer(
 
   // ---- First-person actions ------------------------------------------------------
   /** Viewmodel clips built on demand, one per action, with their sound cues. */
-  const fpvClips = new Map<ClipAction, { clip: import("three").AnimationClip; cues: ClipCue[] }>();
+  const fpvClips = new Map<
+    ClipAction,
+    { clip: import("three").AnimationClip; cues: ClipCue[]; prop: import("three").AnimationClip | null }
+  >();
   /** Cues still to fire for the action playing, in clip order. */
   let fpvCues: ClipCue[] = [];
   let fpvPlayToken = 0;
@@ -11367,6 +11425,7 @@ async function buildViewer(
     if (action === "idle") {
       fpvNow = "idle";
       arms.rest();
+      playProp(null);
       for (const a of weaponActions.values()) a.fadeOut(PARTS_FADE);
       onDone?.();
       return;
@@ -11383,7 +11442,11 @@ async function buildViewer(
         return;
       }
       const built = buildViewmodelClip(THREE as unknown as typeof import("three"), raw);
-      entry = { clip: built.clip, cues: [...(raw.sounds ?? [])].sort((a, b) => a.t - b.t) };
+      entry = {
+        clip: built.clip,
+        cues: [...(raw.sounds ?? [])].sort((a, b) => a.t - b.t),
+        prop: fpvKnife ? buildPropClip(THREE as unknown as typeof import("three"), raw, (b) => !!object.getObjectByName(b)) : null,
+      };
       fpvClips.set(action, entry);
       // The fire clip carries the weapon's rate of fire — see the extractor.
       if (action === "fire") {
@@ -11395,9 +11458,11 @@ async function buildViewer(
     const parts = weaponActions.get(action);
     arms.play(entry.clip, () => {
       parts?.fadeOut(PARTS_FADE);
+      playProp(null);
       if (fpvNow === action) fpvNow = "idle";
       onDone?.();
     });
+    if (entry.prop) playProp(entry.prop);
     if (parts) {
       /**
        * THE PARTS RUN ON THE ARMS' CLOCK.
@@ -11427,6 +11492,44 @@ async function buildViewer(
     }
     fpvCues = entry.cues.slice();
     if (action === "fire") flash?.fire();
+  }
+  /**
+   * Cross the knife's own skeleton onto `clip`, or back to its rest with null.
+   *
+   * The arms' crossfade, mirrored on the weapon's mixer — same length, same
+   * moments — because the two clips are halves of one animation and a blade
+   * that settles before the hand does reads as a glitch. And the same rule
+   * against fading an action that still has weight (see viewerArms' `play`):
+   * re-triggering hands back the cached action, and fading it out and in again
+   * dips the mixer's total weight through zero, which snaps the blade to bind
+   * for a frame.
+   */
+  function playProp(clip: import("three").AnimationClip | null) {
+    if (!weaponMixer || !propRest) return;
+    if (!clip) {
+      if (!propNow) return;
+      propNow.fadeOut(PARTS_FADE);
+      propNow = null;
+      // A fade-out that reached zero DISABLED the rest, and fadeIn does not
+      // re-enable it — same trap viewerArms' wakeRest documents.
+      propRest.enabled = true;
+      propRest.paused = propRest.getClip().duration === 0;
+      propRest.fadeIn(PARTS_FADE).play();
+      return;
+    }
+    const a = weaponMixer.clipAction(clip);
+    const rearm = a.getEffectiveWeight() > 0.01;
+    if (propNow && propNow !== a) propNow.fadeOut(PARTS_FADE);
+    a.reset();
+    a.setLoop(THREE.LoopOnce, 1);
+    a.clampWhenFinished = true;
+    a.enabled = true;
+    a.setEffectiveTimeScale(1);
+    a.setEffectiveWeight(1);
+    propRest.fadeOut(PARTS_FADE);
+    if (!rearm) a.fadeIn(PARTS_FADE);
+    a.play();
+    propNow = a;
   }
   /** Fire any cue the play head has passed. Called once a frame. */
   function pumpFpvCues() {
@@ -11589,6 +11692,11 @@ async function buildViewer(
       THREE, scene, camera, object, decals: liveMesh, uv1Meshes, weaponMeshes,
       get charm() {
         return charm;
+      },
+      // First person: both mixers and what each is playing. Getters, because
+      // every one of these is rebuilt or reassigned after this handle is made.
+      get fpv() {
+        return { arms, weaponMixer, propRest, propNow, fpvNow, fpvClips };
       },
     };
   }
@@ -12537,8 +12645,9 @@ async function buildViewer(
    */
   const applyFpvShift = (w: number, h: number) => {
     if (!fpvCamera) return;
-    const fx = debugNumber("fpvshiftx", 0.1);
-    const fy = debugNumber("fpvshifty", 0.12);
+    // Not for a knife — see fpvKnife.
+    const fx = fpvKnife ? 0 : debugNumber("fpvshiftx", 0.1);
+    const fy = fpvKnife ? 0 : debugNumber("fpvshifty", 0.12);
     const key = `${w}x${h}:${fx}:${fy}`;
     if (key === fpvShiftKey) return;
     fpvShiftKey = key;
@@ -13562,6 +13671,7 @@ async function buildViewer(
       flash?.dispose();
       flash = null;
       weaponMixer?.stopAllAction();
+      propRest = propNow = null;
       weaponMixer = null;
       weaponActions.clear();
       arms?.dispose();
