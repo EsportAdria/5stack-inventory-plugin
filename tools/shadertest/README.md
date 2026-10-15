@@ -10,6 +10,13 @@ back off the GPU as pixels.
 > measurement mistakes that produce confidently wrong answers, and a catalogue of
 > traps in the material format. Keep it updated as you learn more.
 
+> **The compositor now runs Valve's own decompiled shader** (`src/valveCombos`,
+> `src/valveReference.ts`); the hand port in `paintComposite.ts` is a fallback.
+> For "is this skin's math right", use the **Valve parity** panel on the admin
+> Skin Tests tab (whole catalog, sweep of wears) before this rig. The rig's
+> debug modes (`debug: 2|3|4`) still render through the port. See
+> `tools/valve-combos/README.md`.
+
 ## Why this exists
 
 Skins rendered grey for a long time and every "fix" appeared to change nothing.

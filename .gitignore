@@ -22,3 +22,8 @@ tools/shadertest/snapshots/
 # The branches are the durable artifact; these directories are scratch.
 /.claude/worktrees/
 tools/shadertest/envsrc/
+
+# tools/valve-combos scratch: the VRF checkout it builds against, and dotnet output.
+tools/valve-combos/vrf/
+tools/valve-combos/bin/
+tools/valve-combos/obj/

@@ -23,6 +23,7 @@ import {
   RefreshCw,
 } from "lucide-vue-next";
 import SkinTests from "./SkinTests.vue";
+import ValveParity from "./ValveParity.vue";
 import { FLAGS, activeFlags, flagValue, flagsVersion, setFlag } from "../devFlags";
 import {
   API_ORIGIN,
@@ -1620,11 +1621,16 @@ const BTN_DANGER =
         <!-- Skin Tests — renders every finish for a visual sweep. Its own
              component: the render loop + gallery is a lot of state that has no
              business entangled with the cache/extract logic here. -->
-        <SkinTests
-          v-else-if="activeKey === 'tests'"
-          :is-admin="isAdmin"
-          @notify="(m: string, k: 'error' | 'success') => emit('notify', m, k)"
-        />
+        <div v-else-if="activeKey === 'tests'" class="space-y-6">
+          <!-- Valve parity — our compositor against Valve's decompiled one,
+               every finish, a sweep of wears. Answers "is the wear right"
+               without eyeballing the gallery below. -->
+          <ValveParity />
+          <SkinTests
+            :is-admin="isAdmin"
+            @notify="(m: string, k: 'error' | 'success') => emit('notify', m, k)"
+          />
+        </div>
 
         <!-- Developer. Its own tab rather than a row buried in Asset Cache,
              which is where it started and where nobody found it — a switch you

@@ -29,3 +29,8 @@ ignore:
   - "/cs2-model-extract"
   # Its tarball output, same reasoning.
   - "/cs2-models-glb.tar.gz"
+  # tools/valve-combos builds against a local VRF checkout with dotnet; none of
+  # it is wanted in the pod.
+  - "/tools/valve-combos/vrf"
+  - "/tools/valve-combos/bin"
+  - "/tools/valve-combos/obj"
