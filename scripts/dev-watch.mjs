@@ -32,6 +32,8 @@ const WATCH = [
   "federation.shared.ts",
   "tailwind.config.js",
   "postcss.config.cjs",
+  // The one backend file the panel imports (the weapon grid's defaults).
+  "backend/src/loadoutGrid.ts",
 ];
 const POLL_MS = 500;
 const SETTLE_MS = 300;

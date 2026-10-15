@@ -6,6 +6,7 @@
 // inventory rail all read the same definitions instead of re-deriving them.
 import type { InventoryItem, Team } from "./api";
 import { isReadOnly } from "./itemVisuals";
+import { GRID_DEFAULTS, resolveGrid } from "../backend/src/loadoutGrid.ts";
 
 /** A brand-new item is factory-new until someone says otherwise. */
 export const DEFAULT_WEAR = 0;
@@ -91,23 +92,16 @@ export function catsForPos(pos: string): string[] {
   if (/^m/.test(pos)) return ["smg", "heavy"];
   return ["rifle"];
 }
-// CS2 default loadouts (cs2-lib model names).
+// CS2 default loadouts (cs2-lib model names). The grid half is Valve's own
+// table, shared with the backend: /api/equipped/v5 tells the game server the
+// same guns, so a cell and the buy menu can't disagree.
 export const DEFAULTS: Record<Team, Record<string, string>> = {
-  CT: {
-    sp: "usp_silencer", p1: "elite", p2: "p250", p3: "fiveseven", p4: "deagle",
-    m1: "mp9", m2: "mp7", m3: "ump45", m4: "p90", m5: "nova",
-    r1: "famas", r2: "m4a1", r3: "ssg08", r4: "aug", r5: "awp",
-    knife: "knife",
-  },
-  T: {
-    sp: "glock", p1: "elite", p2: "p250", p3: "tec9", p4: "deagle",
-    m1: "mac10", m2: "mp7", m3: "ump45", m4: "p90", m5: "nova",
-    r1: "galilar", r2: "ak47", r3: "ssg08", r4: "sg556", r5: "awp",
-    // Without this the slot falls through to the literal pos ("knife"), which
-    // is a real cs2-lib key — but the CT default, so T showed a CT knife.
-    knife: "knife_t",
-  },
+  CT: { ...GRID_DEFAULTS.CT, knife: "knife" },
+  // Without the knife the slot falls through to the literal pos ("knife"),
+  // which is a real cs2-lib key — but the CT default, so T showed a CT knife.
+  T: { ...GRID_DEFAULTS.T, knife: "knife_t" },
 };
+export { resolveGrid };
 
 export const RAIL = [
   { slot: "agent", name: "Agent" },
