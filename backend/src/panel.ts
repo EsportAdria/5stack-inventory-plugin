@@ -91,6 +91,7 @@ async function probe(run: () => Promise<unknown>): Promise<boolean> {
 export async function gamePluginState(
   cookie: string,
 ): Promise<GamePluginState> {
+  const ranksRead = rankSettings(cookie);
   const data = await query<{
     game_plugins: Array<{
       slug: string;
@@ -120,6 +121,7 @@ export async function gamePluginState(
 
   const plugin = data.game_plugins?.[0] ?? null;
   const install = data.game_plugin_installs?.[0] ?? null;
+  const ranks = await ranksRead;
 
   return {
     inCatalog: Boolean(plugin),
@@ -131,8 +133,46 @@ export async function gamePluginState(
     requiresGuidelinesDisabled: Boolean(
       plugin?.requires_server_guidelines_disabled,
     ),
-    guidelinesDisabled: Boolean(install?.disable_server_guidelines),
+    guidelinesDisabled: guidelinesAlreadyOff(
+      Boolean(install?.disable_server_guidelines),
+      ranks,
+    ),
   };
+}
+
+// 5stack Ranks turns the same setting off for the servers matches run on, and
+// the panel's plugin page then says "already off" instead of offering a switch.
+// The same two settings the page reads.
+const RANKS_SETTINGS = ["fivestack_ranks_matches", "fivestack_ranks_tournaments"];
+
+export function guidelinesAlreadyOff(
+  pluginTurnedThemOff: boolean,
+  settings: Array<{ name: string; value: string | null }>,
+): boolean {
+  return (
+    pluginTurnedThemOff ||
+    settings.some((setting) => RANKS_SETTINGS.includes(setting.name) && setting.value === "true")
+  );
+}
+
+// Apart from gamePluginState's query, and never fatal: a panel that hides
+// settings from this role must still show the Game Server tab.
+async function rankSettings(
+  cookie: string,
+): Promise<Array<{ name: string; value: string | null }>> {
+  try {
+    const data = await query<{ settings: Array<{ name: string; value: string | null }> }>(cookie, {
+      query: `query rankSettings {
+        settings(where: { name: { _in: ${JSON.stringify(RANKS_SETTINGS)} } }) {
+          name
+          value
+        }
+      }`,
+    });
+    return data.settings ?? [];
+  } catch {
+    return [];
+  }
 }
 
 export async function installGamePlugin(cookie: string): Promise<void> {
