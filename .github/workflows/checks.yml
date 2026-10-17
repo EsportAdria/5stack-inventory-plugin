@@ -27,6 +27,7 @@ on:
   push:
     branches:
       - "main"
+      - "test/live-extraction-status"
   pull_request:
   workflow_dispatch:
 
