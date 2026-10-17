@@ -1374,6 +1374,7 @@ export interface ExtractStatus {
     panelReserveMb: number;
     memTotalMb: number | null;
     memAvailableMb: number | null;
+    memoryScope?: "host" | "container";
   };
 }
 // Plain <a download> hits this: same cookie-auth path the render <img> tags
