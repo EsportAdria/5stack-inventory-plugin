@@ -77,7 +77,7 @@ export function parseShareTarget(rawPath: string, query: Record<string, string |
   }
 
   // `player` is the shareable loadout link and the profile tab's own flag (see
-  // the README): the same 17-digit steam64 in both, which is why one branch
+  // docs/DEVELOPMENT.md): the same 17-digit steam64 in both, which is why one branch
   // covers both entry points.
   const player = query.player;
   if (player && /^\d{17}$/.test(player)) {
