@@ -4,7 +4,7 @@ Everything below is for people changing the plugin or building their own. To
 install it on a 5stack site, see the [README](../README.md).
 
 The plugin is a CS2 inventory simulator that renders **natively inside the
-5stack panel**. It is **not** part of the 5stack brand or codebase — it's an
+5stack panel** as a [plugin](https://github.com/5stackgg). It is **not** part of the 5stack brand or codebase — it's an
 independent micro-frontend, loaded at runtime via Module Federation, that reuses
 5stack's Steam login instead of its own auth.
 
@@ -37,7 +37,7 @@ cookie ──▶ /plugins/authorize ──▶ identity   validates the session i
 | --- | --- |
 | `src/App.vue` | the loadout UI (exposed `./App` remote; receives the host props) |
 | `src/pluginRouter.ts` | the routing contract — host props in, `go()`/`href()` out |
-| `src/AdminConsole.vue` | the `/admin` route (server key, asset cache, extraction) |
+| `src/components/AdminConsole.vue` | the `/admin` route (server key, asset cache, extraction) |
 | `vite.config.ts` | Federation `exposes` + shared singletons |
 | `shared-globals.ts` | resolves `vue` to the panel's instance (replaces Federation `shared`) |
 | `backend/src/catalog.ts` | CS2 item catalog via `@ianlucas/cs2-lib` |
@@ -94,7 +94,7 @@ truth, so tabs, deep links and the back button can't disagree.
 
 A plugin can also mount as a tab on the panel's player pages. Set
 `profileTabLabel` in `5stack-plugin.json` (admins can override it per-site in
-Settings → Application → Plugins); the panel then renders a tab with that label
+Settings → Application → Panel Plugins); the panel then renders a tab with that label
 on `/players/:steamid`, beside Combat, and mounts the remote inside it.
 
 In that position the host passes two extra query keys:
@@ -247,7 +247,8 @@ CSS build), and restart. Config comes from the convars below, not from a plugin
 config file. 5stack's own server images already ship the plugin; you only need
 this for servers you build yourself.
 
-**Settings → Game Server → Configure** writes this block for you, in one place:
+**⚙ settings → Game Server** (**Install and configure**, or **Configure my
+servers** once the plugin is installed) writes this block for you, in one place:
 
 ```
 invsim_url "https://inventory.5stack.gg"
@@ -376,8 +377,13 @@ does the build-watch + serve in one command.
 
 ## Installing by hand
 
-`./plugin.sh` (see the [README](../README.md)) does all of this for you, applying one of
-two overlays:
+`./plugin.sh` (see the [README](../README.md)) does all of this for you. The panel
+already knows the site, so the installer reads rather than asks: the kubeconfig,
+your `WEB_DOMAIN` (the host defaults to `inventory.<your domain>`), the Postgres
+connection string copied out of the cluster, and, from `REVERSE_PROXY`, which of
+the two overlays below to apply. Then it labels a node, applies, and tells you
+what's left (DNS, cert, registration). Re-run it to upgrade; your answers are
+kept.
 
 | | |
 | --- | --- |
@@ -431,14 +437,18 @@ Without the installer:
    at **`/opt/5stack/models/cs2-model-extract`** on the node (mounted read-only
    at `/cs2-models`; `/models/*` is served from its `models/` subfolder).
    Populate it with `scripts/extract-models.sh` run against a CS2 install —
-   or just hit "extract models" in the plugin's admin settings, which runs the
-   same script in the backend pod against the CS2 dedicated-server install
+   or leave it to the backend, which runs the same script on its own once the
+   CS2 dedicated-server install it mounts is complete (**Run extraction** under
+   ⚙ settings → 3D Models starts it by hand). It reads the install
    mounted at `/cs2-game` (hostPath `/opt/5stack/serverfiles`). The
-   mount is `DirectoryOrCreate`, so pods run fine without it — the UI detects
-   missing models via 404s and simply never offers 3D rendering. Refreshing
+   models mount is `DirectoryOrCreate`, so pods run fine without it — the UI
+   detects missing models via 404s and simply never offers 3D rendering. The
+   CS2 mount is not: the backend won't start on a node without
+   `/opt/5stack/serverfiles`. Refreshing
    models is a file copy on the node; no rebuild or redeploy.
 6. **Deploy**: from the panel repo, `./custom.sh inventory`.
-7. **Register the plugin** in the panel: Settings → Application → Plugins → Add,
+7. **Register the plugin** in the panel: Settings → Application → Panel Plugins
+   (turn on the switch beside the heading) → Add Panel Plugin,
    with:
    - **Slug**: `inventory`
    - **Remote Entry URL**: `https://inventory.yoursite.gg/assets/remoteEntry.js`
