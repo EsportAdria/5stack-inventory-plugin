@@ -39,5 +39,8 @@ COPY backend/ ./
 COPY scripts/ /app/scripts/
 COPY tools/nmclip.mjs tools/dmx.mjs tools/nmclip-data.mjs /app/tools/
 RUN chmod +x /app/scripts/extract-models.sh
+# After `npm ci`, which skips devDependencies under it. Without it, DEV_STEAM_ID
+# in inventory.env (envFrom) would make every cookieless request an admin.
+ENV NODE_ENV=production
 EXPOSE 3000
 CMD ["npm", "start"]
