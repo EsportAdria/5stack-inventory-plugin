@@ -157,6 +157,11 @@ spec:
           # :latest defaults to Always anyway (same as the api image); spelled
           # out so a tagged build can't silently start serving a cached layer.
           imagePullPolicy: Always
+          # inventory.env: the panel origins originGuard.ts trusts (plugin.sh
+          # writes WEB_DOMAIN and AUTH_COOKIE_DOMAIN there on every run).
+          envFrom:
+            - configMapRef:
+                name: inventory-config
           env:
             # From this package's own inventory-secrets.env, NOT the panel's
             # timescaledb-secrets — see the secretGenerator note in

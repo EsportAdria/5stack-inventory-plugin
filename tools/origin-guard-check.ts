@@ -9,6 +9,7 @@
 // looks wrong. Too tight, and every craft and equip from the real panel is a
 // 403 that the browser reports as an anonymous CORS error. Both depend only on
 // strings — the Origin, the host, the env — so they can be pinned here.
+import { readFileSync } from "node:fs";
 import { isAllowedOrigin, originPolicyFromEnv, refuseCrossSite, requestHost } from "../backend/src/originGuard.ts";
 
 let failures = 0;
@@ -52,6 +53,10 @@ check("EXTRA_CORS_ORIGINS: second entry", allowed("https://x.trycloudflare.com",
 check("EXTRA_CORS_ORIGINS: exact origin only", allowed("https://panel.example.net:8443", HOST, extra), false);
 const panelUrl = originPolicyFromEnv({ NODE_ENV: "production", FIVESTACK_PANEL_URL: "https://cs.example.org/" });
 check("FIVESTACK_PANEL_URL counts", allowed("https://cs.example.org", "inventory.example.org", panelUrl), true);
+const SIBLING = "inventory-cs-panel.example.com";
+check("panel beside this host is refused without config", allowed("https://cs-panel.example.com", SIBLING), false);
+const sibling = originPolicyFromEnv({ NODE_ENV: "production", WEB_DOMAIN: "cs-panel.example.com" });
+check("WEB_DOMAIN: panel beside this host", allowed("https://cs-panel.example.com", SIBLING, sibling), true);
 const dev = originPolicyFromEnv({});
 check("localhost allowed outside production", allowed("http://localhost:3000", HOST, dev), true);
 
@@ -67,6 +72,25 @@ check("POST from elsewhere is refused", typeof req("POST", { origin: "https://ev
 check("DELETE from elsewhere is refused", typeof req("DELETE", { origin: "https://evil.com" }), "string");
 check("POST with no Origin (game server) passes", req("POST", {}), null);
 check("POST with no Origin but cross-site is refused", typeof req("POST", { "sec-fetch-site": "cross-site" }), "string");
+
+// The policy is only as good as the env the deploy hands it. plugin.sh writes
+// the panel's WEB_DOMAIN and AUTH_COOKIE_DOMAIN into install.panel.file, and
+// the backend has to read that same file, or a panel beside this host is
+// refused with nothing to set that fixes it.
+const repoFile = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+const manifest = JSON.parse(repoFile("public/5stack-plugin.json"));
+check("the installer is asked for the panel's origins", manifest.install?.panel?.file, "k8s/base/inventory.env");
+check(
+  "that file feeds inventory-config",
+  /- name: inventory-config\n\s+envs:\n\s+- inventory\.env\n/.test(repoFile("k8s/base/kustomization.yaml")),
+  true,
+);
+const backend = repoFile("k8s/base/deployment.yaml").split(/^\s+- name: inventory-backend$/m)[1] ?? "";
+check(
+  "the backend reads inventory-config",
+  /envFrom:\n\s+- configMapRef:\n\s+name: inventory-config\n/.test(backend),
+  true,
+);
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);

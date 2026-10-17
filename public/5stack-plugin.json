@@ -24,6 +24,9 @@
       "var": "DATABASE_URL",
       "file": "k8s/base/inventory-secrets.env"
     },
+    "panel": {
+      "file": "k8s/base/inventory.env"
+    },
     "node": {
       "label": "5stack-inventory"
     }
