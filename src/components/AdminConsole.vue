@@ -1140,8 +1140,8 @@ const BTN_DANGER =
                 class="rounded-md border border-[hsl(var(--tac-amber)/0.4)] bg-[hsl(var(--tac-amber)/0.08)] px-3 py-2.5 text-sm"
               >
                 This plugin cannot change what players see until Valve's server guidelines are
-                turned off for it, which your panel asks you to accept separately &mdash; it
-                risks every Steam game server token on your account.
+                turned off for it. Its page warns that this can get every game server token
+                (GSLT) on your Steam account banned.
                 <a :class="[BTN, BTN_FILLED, 'mt-2']" :href="pluginDirectoryPath" target="_top">
                   Open its page to turn them off
                 </a>
