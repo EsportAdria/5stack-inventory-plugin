@@ -458,7 +458,9 @@ async function refreshExtractStatus() {
 let cacheTick = 0;
 async function pollTick() {
   await refreshExtractStatus();
-  if (cacheTick++ % 3 === 0) await refreshCacheStats();
+  // Only a live run grows the mount. Waiting on the CS2 install can last as long
+  // as the node has none, and the walk would repeat for nothing.
+  if (extractLive.value && cacheTick++ % 3 === 0) await refreshCacheStats();
 }
 
 // Presentation of the run state, hoisted out of the template: three ternary

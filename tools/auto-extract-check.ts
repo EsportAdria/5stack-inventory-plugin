@@ -7,7 +7,7 @@
 // ("CS2 install not readable"), logged a warning nobody reads, and the panel sat
 // on "Never run" with item art hidden until an admin happened to press the
 // button. Nothing crashes in that failure, so it is pinned here.
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { autoExtractor, installProblem, type AutoExtractDeps } from "../backend/src/autoExtract.ts";
@@ -146,8 +146,9 @@ function harness(overrides: Partial<AutoExtractDeps> = {}) {
 
 // The install itself. Starting on a half-downloaded one fails the run, and a
 // failed run is never retried, so "has the vpk" is not enough.
+const scratch = mkdtempSync(path.join(os.tmpdir(), "auto-extract-check-"));
 function cs2Dir(files: Record<string, string>) {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "cs2-"));
+  const dir = mkdtempSync(path.join(scratch, "cs2-"));
   for (const [rel, body] of Object.entries(files)) {
     mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
     writeFileSync(path.join(dir, rel), body);
@@ -165,6 +166,16 @@ check(
   true,
 );
 check(
+  "installed with a newer build out (StateFlags 6) is ready",
+  await ready({ ...GAME, "steamapps/appmanifest_730.acf": '"AppState"\n{\n\t"StateFlags"\t\t"6"\n}\n' }),
+  true,
+);
+check(
+  "updating over an installed build (StateFlags 1030) is not",
+  await ready({ ...GAME, "steamapps/appmanifest_730.acf": '"AppState"\n{\n\t"StateFlags"\t\t"1030"\n}\n' }),
+  false,
+);
+check(
   "steamcmd mid-download (StateFlags 1026) is not",
   await ready({ ...GAME, "steamapps/appmanifest_730.acf": '"AppState"\n{\n\t"StateFlags"\t\t"1026"\n}\n' }),
   false,
@@ -175,6 +186,8 @@ check(
   await ready({ ...GAME, ".5stack.build": "123", "steamapps/appmanifest_730.acf": '"AppState"\n{\n\t"buildid"\t\t"123"\n}\n' }),
   true,
 );
+
+rmSync(scratch, { recursive: true, force: true });
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);

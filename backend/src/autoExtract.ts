@@ -31,17 +31,20 @@ export interface AutoExtractDeps {
 export async function installProblem(dir: string): Promise<string | null> {
   const exists = (rel: string) => fs.access(path.join(dir, rel)).then(() => true, () => false);
   if (!(await exists("game/csgo/pak01_dir.vpk")) || !(await exists("game/csgo/steam.inf"))) {
-    return `No CS2 install at ${dir} (looked for game/csgo/pak01_dir.vpk). The inventory has to run on a node that hosts game servers, or set CS2_DIR.`;
+    return `No CS2 install at ${dir} (looked for game/csgo/pak01_dir.vpk and steam.inf). The inventory has to run on a node that hosts game servers, or set CS2_DIR.`;
   }
   // A run started on a half-downloaded install fails, and a failed run switches
   // the auto-run off for good. A game node's update deletes steamapps/ first: a
   // pinned build writes the manifest last (with .5stack.build there throughout),
-  // and steamcmd keeps StateFlags at 4 (fully installed) only once it is done. No
-  // manifest and no build file is a CS2 dir the operator pointed us at.
+  // and steamcmd's StateFlags is a bitmask that only reads 4 (fully installed),
+  // plus 2 when a newer build is out, once nothing is downloading. No manifest
+  // and no build file is a CS2 dir the operator pointed us at.
   const manifest = await fs.readFile(path.join(dir, "steamapps", "appmanifest_730.acf"), "utf8").catch(() => null);
-  const flags = manifest?.match(/"StateFlags"\s+"(\d+)"/)?.[1];
+  const flagsText = manifest?.match(/"StateFlags"\s+"(\d+)"/)?.[1];
+  const flags = flagsText === undefined ? null : Number(flagsText);
   const pinnedUpdateRunning = manifest === null && (await exists(".5stack.build"));
-  if (pinnedUpdateRunning || (flags !== undefined && flags !== "4")) {
+  const steamcmdBusy = flags !== null && ((flags & 4) === 0 || (flags & ~6) !== 0);
+  if (pinnedUpdateRunning || steamcmdBusy) {
     return `CS2 at ${dir} is still downloading or updating.`;
   }
   return null;
