@@ -414,9 +414,11 @@ const extractStatus = ref<ExtractStatus | null>(null);
 const extractBusy = ref(false);
 let extractPoll: ReturnType<typeof setInterval> | null = null;
 const extractLive = computed(() => extractStatus.value?.state === "running");
+let extractPollMs = 0;
 function stopPoll() {
   if (extractPoll) clearInterval(extractPoll);
   extractPoll = null;
+  extractPollMs = 0;
 }
 async function refreshExtractStatus() {
   const wasLive = extractLive.value;
@@ -432,11 +434,18 @@ async function refreshExtractStatus() {
   } catch {
     extractStatus.value = null; // older backend — the section says so
   }
-  if (extractLive.value && !extractPoll) {
-    extractPoll = setInterval(pollTick, 5000);
-  } else if (!extractLive.value && extractPoll) {
+  // Slowly while the backend waits on the CS2 install, so the card flips to the
+  // run when it starts instead of still claiming the install is missing.
+  const every = extractLive.value ? 5000 : extractStatus.value?.autoExtractWaiting ? 30000 : 0;
+  if (every !== extractPollMs) {
     stopPoll();
-    if (wasLive && extractStatus.value?.state === "succeeded") {
+    if (every) {
+      extractPoll = setInterval(pollTick, every);
+      extractPollMs = every;
+    }
+  }
+  if (wasLive && !extractLive.value) {
+    if (extractStatus.value?.state === "succeeded") {
       emit("notify", tr("inventory.admin.extract.finished", "Model extraction finished — 3D assets are live on the mount."), "success");
     }
   }
@@ -449,7 +458,9 @@ async function refreshExtractStatus() {
 let cacheTick = 0;
 async function pollTick() {
   await refreshExtractStatus();
-  if (cacheTick++ % 3 === 0) await refreshCacheStats();
+  // Only a live run grows the mount. Waiting on the CS2 install can last as long
+  // as the node has none, and the walk would repeat for nothing.
+  if (extractLive.value && cacheTick++ % 3 === 0) await refreshCacheStats();
 }
 
 // Presentation of the run state, hoisted out of the template: three ternary
@@ -2044,7 +2055,16 @@ const BTN_DANGER =
                      its own callout above: one action, one place. A separate
                      banner made a single re-run read as a second problem. -->
                 <p class="min-w-[16rem] flex-1 space-y-0.5 text-xs">
-                  <span v-if="extractStatus.stale" class="block font-medium text-[hsl(var(--tac-amber))]">
+                  <!-- Ahead of "Never run": pressing the button can't help until
+                       the install is there, and the backend log was the only
+                       place that said so. -->
+                  <template v-if="extractStatus.blocked">
+                    <span class="block font-medium text-destructive">{{ extractStatus.blocked }}</span>
+                    <span v-if="extractStatus.autoExtractWaiting" class="block text-muted-foreground">
+                      Extraction starts by itself once it's ready — checked every 5 minutes.
+                    </span>
+                  </template>
+                  <span v-else-if="extractStatus.stale" class="block font-medium text-[hsl(var(--tac-amber))]">
                     {{
                       extractStatus.extracted === false
                         ? "Never run — item art and 3D stay hidden until it does."

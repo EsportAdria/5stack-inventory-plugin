@@ -1315,6 +1315,12 @@ export interface ExtractStatus {
   requiredVersion?: number | null;
   extracted?: boolean;
   stale?: boolean;
+  /** Why a run can't start on this node right now (no CS2 install, or one
+   *  still downloading), or null. `autoExtractWaiting`: the backend has a retry
+   *  scheduled, so the run starts by itself once that clears. Both absent on
+   *  older backends. */
+  blocked?: string | null;
+  autoExtractWaiting?: boolean;
   /** Wall-clock of the last successful run, and the per-step breakdown of it.
    *  Null on mounts stamped before v5 — "unknown", not zero. */
   lastRunSeconds?: number | null;

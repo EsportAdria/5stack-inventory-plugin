@@ -13,6 +13,7 @@ import { pool } from "./db.ts";
 import { parseByteRange } from "./byteRange.mjs";
 import { getIdentity } from "./identity.ts";
 import { isAllowedOrigin, originPolicyFromEnv, refuseCrossSite, requestHost } from "./originGuard.ts";
+import { autoExtractor, installProblem } from "./autoExtract.ts";
 import {
   GAME_PLUGIN_SLUG,
   deleteTypeCfg,
@@ -6106,6 +6107,8 @@ async function acquireExtractLock(): Promise<{ ok: true } | { ok: false; error: 
   return { ok: false, error: "Could not claim the extraction lock." };
 }
 
+const cs2InstallProblem = () => installProblem(CS2_DIR);
+
 /** Launch the extraction. Returns an error shape instead of throwing so both
  *  the admin route and the boot-time auto-run can report it their own way. */
 async function startExtraction(): Promise<{ started: true } | { code: number; error: string }> {
@@ -6126,13 +6129,8 @@ async function startExtraction(): Promise<{ started: true } | { code: number; er
 
   // Fail loudly up front rather than spawning something that can't work: these
   // two paths are exactly what the deployment has to mount.
-  const vpk = path.join(CS2_DIR, "game", "csgo", "pak01_dir.vpk");
-  if (!(await fs.access(vpk).then(() => true, () => false))) {
-    return await fail(
-      412,
-      `CS2 install not readable at ${CS2_DIR} (looked for game/csgo/pak01_dir.vpk). Mount the game dir into the backend and/or set CS2_DIR.`,
-    );
-  }
+  const missingInstall = await cs2InstallProblem();
+  if (missingInstall) return await fail(412, missingInstall);
   const script = await resolveExtractScript();
   if (!script) {
     return await fail(
@@ -6233,42 +6231,18 @@ app.post("/api/admin/extract-models", async (request, reply) => {
   return result;
 });
 
-// Self-heal on boot. A mount that is empty or behind the pipeline means blank
-// item art and white skins — there is nothing an admin would do about it except
-// press the button, so press it for them. Set INVENTORY_AUTO_EXTRACT=0 to
-// disable (e.g. a node where the ~30 minute run is unwelcome at startup).
-async function autoExtractIfStale() {
-  if (process.env.INVENTORY_AUTO_EXTRACT === "0") return;
-  try {
-    const info = await extractVersionInfo();
-    if (!info.stale) return;
-    // Already running, started by a process that has since been replaced —
-    // `node --watch` restarts on every edit, and without this the auto-run
-    // stacks a second extraction on top of the live one.
-    const running = await liveExtractionPid();
-    if (running !== null) {
-      app.log.info(`[extract-models] already running (pid ${running}) — not auto-starting another`);
-      return;
-    }
-    // A previous run that FAILED is not something to retry on every restart —
-    // a crash-looping pod would spawn a multi-GB job each time, and the failure
-    // wants a human. Manual re-run still works.
-    const prior = await readExtractState();
-    if (prior.state === "failed") {
-      app.log.warn("[extract-models] mount is stale but the last run failed — not auto-running; re-run it from the panel");
-      return;
-    }
-    app.log.info(
-      `[extract-models] mount is stale (has v${info.extractVersion ?? "none"}, script produces v${info.requiredVersion}) — starting automatically`,
-    );
-    const result = await startExtraction();
-    if ("code" in result) {
-      app.log.warn(`[extract-models] auto-run could not start: ${result.error}`);
-    }
-  } catch (e) {
-    app.log.warn(`[extract-models] auto-run check failed: ${(e as Error).message}`);
-  }
-}
+// How often a stale mount waiting on an unreadable CS2 install looks again.
+const AUTO_EXTRACT_RETRY_MS = 5 * 60_000;
+const autoExtract = autoExtractor({
+  enabled: () => process.env.INVENTORY_AUTO_EXTRACT !== "0",
+  versionInfo: extractVersionInfo,
+  running: liveExtractionPid,
+  lastRunFailed: async () => (await readExtractState()).state === "failed",
+  blocker: cs2InstallProblem,
+  start: startExtraction,
+  later: (fn) => void setTimeout(fn, AUTO_EXTRACT_RETRY_MS).unref(),
+  log: { info: (msg) => app.log.info(msg), warn: (msg) => app.log.warn(msg) },
+});
 
 app.get("/api/admin/extract-models", async (request, reply) => {
   const denied = await requireAdmin(request);
@@ -6285,6 +6259,8 @@ app.get("/api/admin/extract-models", async (request, reply) => {
     ...status,
     logBytes,
     progress,
+    blocked: live ? null : await cs2InstallProblem(),
+    autoExtractWaiting: autoExtract.waiting(),
     workers: await extractWorkerInfo(),
     ...(await extractVersionInfo()),
   };
@@ -6830,7 +6806,7 @@ async function start() {
   // for a moment, and the next request is right — far better than delaying
   // listen() on 63 file reads.
   void warmPatchSlots(getAgents().map((a) => a.model).filter((m): m is string => !!m));
-  void autoExtractIfStale();
+  void autoExtract.run();
   // Prices: warm the index off the mirror already in Postgres, then keep it
   // fresh on the hour. Both fire-and-forget — pricing is an enhancement, and a
   // slow or unreachable feed must never hold up listen() or a single request.
