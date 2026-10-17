@@ -410,8 +410,10 @@ two overlays and the values the installer fills in. The format is at
    `k8s/kustomization.yaml` defaults to the HTTP install — point it at
    `overlays/https` if your panel terminates TLS at the cluster.
 3. **Configure** (both files live in `k8s/base/`):
-   - `inventory.env` → `INVENTORY_DOMAIN` (e.g. `inventory.yoursite.gg`) and
-     `CORS_ALLOW_ORIGIN` (your panel origin, e.g. `https://yoursite.gg`).
+   - `inventory.env` → `INVENTORY_DOMAIN` (e.g. `inventory.yoursite.gg`), and
+     your panel's `WEB_DOMAIN` (e.g. `yoursite.gg`) plus `AUTH_COOKIE_DOMAIN`
+     if its api sets one. Without them, a panel beside the plugin's host
+     (`cs.yoursite.gg` next to `inventory-cs.yoursite.gg`) is refused.
    - `inventory-secrets.env` (copy from `inventory-secrets.env.example`) →
      `DATABASE_URL`. The plugin creates and owns an **`inventory` schema** (not
      a separate database) and schema-qualifies every query, so this is normally
