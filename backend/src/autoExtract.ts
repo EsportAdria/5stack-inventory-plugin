@@ -3,11 +3,13 @@
 // press the button, so press it for them. Set INVENTORY_AUTO_EXTRACT=0 to
 // disable (e.g. a node where the ~30 minute run is unwelcome at startup).
 //
-// A node whose CS2 install isn't readable yet (a fresh install whose game server
+// A node whose CS2 install isn't ready yet (a fresh install whose game server
 // is still downloading it) is looked at again on every `later` until it is.
 // Checking once at boot left those mounts on "Never run" for good.
 //
 // Apart from main.ts so tools/auto-extract-check.ts can drive it with fakes.
+import { promises as fs } from "node:fs";
+import path from "node:path";
 
 type StartResult = { started: true } | { code: number; error: string };
 
@@ -23,11 +25,44 @@ export interface AutoExtractDeps {
   log: { info: (msg: string) => void; warn: (msg: string) => void };
 }
 
-export function autoExtractor(deps: AutoExtractDeps): () => Promise<void> {
+/** Why an extraction can't start against `dir` right now, or null. Fresh
+ *  installs hit this while the game server is still downloading CS2, so the
+ *  auto-run waits on it and the panel shows it. */
+export async function installProblem(dir: string): Promise<string | null> {
+  const exists = (rel: string) => fs.access(path.join(dir, rel)).then(() => true, () => false);
+  if (!(await exists("game/csgo/pak01_dir.vpk")) || !(await exists("game/csgo/steam.inf"))) {
+    return `No CS2 install at ${dir} (looked for game/csgo/pak01_dir.vpk). The inventory has to run on a node that hosts game servers, or set CS2_DIR.`;
+  }
+  // A run started on a half-downloaded install fails, and a failed run switches
+  // the auto-run off for good. A game node's update deletes steamapps/ first: a
+  // pinned build writes the manifest last (with .5stack.build there throughout),
+  // and steamcmd keeps StateFlags at 4 (fully installed) only once it is done. No
+  // manifest and no build file is a CS2 dir the operator pointed us at.
+  const manifest = await fs.readFile(path.join(dir, "steamapps", "appmanifest_730.acf"), "utf8").catch(() => null);
+  const flags = manifest?.match(/"StateFlags"\s+"(\d+)"/)?.[1];
+  const pinnedUpdateRunning = manifest === null && (await exists(".5stack.build"));
+  if (pinnedUpdateRunning || (flags !== undefined && flags !== "4")) {
+    return `CS2 at ${dir} is still downloading or updating.`;
+  }
+  return null;
+}
+
+export interface AutoExtractor {
+  run: () => Promise<void>;
+  /** A retry is scheduled: the run starts by itself once the install is ready. */
+  waiting: () => boolean;
+}
+
+export function autoExtractor(deps: AutoExtractDeps): AutoExtractor {
+  let waiting = false;
+  const wait = () => {
+    waiting = true;
+    deps.later(retry);
+  };
+  // Runs from a timer, where a rejection is unhandled and takes the process down.
   // The blocker is cheap to ask; the version info reads steam.inf and warns when
   // it can't, which every retry against a missing install would repeat.
-  // Runs from a timer, where a rejection is unhandled and takes the process down.
-  const retry = async () => {
+  async function retry() {
     try {
       if (await deps.blocker()) {
         deps.later(retry);
@@ -35,11 +70,14 @@ export function autoExtractor(deps: AutoExtractDeps): () => Promise<void> {
       }
     } catch (e) {
       deps.log.warn(`[extract-models] auto-run check failed: ${(e as Error).message}`);
+      deps.later(retry);
       return;
     }
-    await autoExtractIfStale();
-  };
-  async function autoExtractIfStale() {
+    await run();
+  }
+  async function run() {
+    const wasWaiting = waiting;
+    waiting = false;
     if (!deps.enabled()) return;
     try {
       const info = await deps.versionInfo();
@@ -66,10 +104,12 @@ export function autoExtractor(deps: AutoExtractDeps): () => Promise<void> {
       if (!("code" in result)) return;
       const blocked = await deps.blocker();
       deps.log.warn(`[extract-models] auto-run could not start: ${result.error}${blocked ? " — will start once it can" : ""}`);
-      if (blocked) deps.later(retry);
+      if (blocked) wait();
     } catch (e) {
       deps.log.warn(`[extract-models] auto-run check failed: ${(e as Error).message}`);
+      // A blip (the database, say) mid-wait must not end the wait for good.
+      if (wasWaiting) wait();
     }
   }
-  return autoExtractIfStale;
+  return { run, waiting: () => waiting };
 }

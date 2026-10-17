@@ -414,9 +414,11 @@ const extractStatus = ref<ExtractStatus | null>(null);
 const extractBusy = ref(false);
 let extractPoll: ReturnType<typeof setInterval> | null = null;
 const extractLive = computed(() => extractStatus.value?.state === "running");
+let extractPollMs = 0;
 function stopPoll() {
   if (extractPoll) clearInterval(extractPoll);
   extractPoll = null;
+  extractPollMs = 0;
 }
 async function refreshExtractStatus() {
   const wasLive = extractLive.value;
@@ -432,11 +434,18 @@ async function refreshExtractStatus() {
   } catch {
     extractStatus.value = null; // older backend — the section says so
   }
-  if (extractLive.value && !extractPoll) {
-    extractPoll = setInterval(pollTick, 5000);
-  } else if (!extractLive.value && extractPoll) {
+  // Slowly while the backend waits on the CS2 install, so the card flips to the
+  // run when it starts instead of still claiming the install is missing.
+  const every = extractLive.value ? 5000 : extractStatus.value?.autoExtractWaiting ? 30000 : 0;
+  if (every !== extractPollMs) {
     stopPoll();
-    if (wasLive && extractStatus.value?.state === "succeeded") {
+    if (every) {
+      extractPoll = setInterval(pollTick, every);
+      extractPollMs = every;
+    }
+  }
+  if (wasLive && !extractLive.value) {
+    if (extractStatus.value?.state === "succeeded") {
       emit("notify", tr("inventory.admin.extract.finished", "Model extraction finished — 3D assets are live on the mount."), "success");
     }
   }
@@ -2049,11 +2058,8 @@ const BTN_DANGER =
                        place that said so. -->
                   <template v-if="extractStatus.blocked">
                     <span class="block font-medium text-destructive">{{ extractStatus.blocked }}</span>
-                    <span
-                      v-if="extractStatus.stale && extractStatus.autoExtract && extractStatus.state !== 'failed'"
-                      class="block text-muted-foreground"
-                    >
-                      Starts by itself once it is — checked every 5 minutes.
+                    <span v-if="extractStatus.autoExtractWaiting" class="block text-muted-foreground">
+                      Extraction starts by itself once it's ready — checked every 5 minutes.
                     </span>
                   </template>
                   <span v-else-if="extractStatus.stale" class="block font-medium text-[hsl(var(--tac-amber))]">

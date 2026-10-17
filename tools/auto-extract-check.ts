@@ -7,7 +7,10 @@
 // ("CS2 install not readable"), logged a warning nobody reads, and the panel sat
 // on "Never run" with item art hidden until an admin happened to press the
 // button. Nothing crashes in that failure, so it is pinned here.
-import { autoExtractor, type AutoExtractDeps } from "../backend/src/autoExtract.ts";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { autoExtractor, installProblem, type AutoExtractDeps } from "../backend/src/autoExtract.ts";
 
 let failures = 0;
 function check(label: string, got: unknown, want: unknown) {
@@ -41,7 +44,7 @@ function harness(overrides: Partial<AutoExtractDeps> = {}) {
     log: { info: () => {}, warn: (m) => void world.warnings.push(m) },
     ...overrides,
   };
-  const run = autoExtractor(deps);
+  const { run, waiting } = autoExtractor(deps);
   // Fire every pending retry, as many rounds as asked.
   const tick = async (rounds = 1) => {
     for (let i = 0; i < rounds; i++) {
@@ -49,21 +52,52 @@ function harness(overrides: Partial<AutoExtractDeps> = {}) {
       for (const fn of due) await fn();
     }
   };
-  return { world, run, tick };
+  return { world, run, waiting, tick };
 }
 
 {
-  const { world, run, tick } = harness();
+  const { world, run, waiting, tick } = harness();
   await run();
   check("install missing at boot: nothing started", world.starts, 0);
-  check("install missing at boot: a retry is scheduled", world.timers.length, 1);
+  check("install missing at boot: a retry is scheduled", [world.timers.length, waiting()], [1, true]);
   await tick(3);
-  check("still missing: no start, still waiting", [world.starts, world.timers.length], [0, 1]);
+  check("still missing: no start, still waiting", [world.starts, world.timers.length, waiting()], [0, 1, true]);
   check("still missing: warned once, not every retry", world.warnings.length, 1);
   world.installed = true;
   await tick();
   check("install appears: the extraction starts", world.starts, 1);
-  check("after it starts: no more retries", world.timers.length, 0);
+  check("after it starts: no more retries, not waiting", [world.timers.length, waiting()], [0, false]);
+}
+
+{
+  let boom = false;
+  const { world, run, waiting, tick } = harness({
+    versionInfo: async () => {
+      if (boom) throw new Error("database went away");
+      return { stale: world.stale, extractVersion: null, requiredVersion: 40 };
+    },
+  });
+  await run();
+  world.installed = true;
+  boom = true;
+  await tick();
+  check("a throw while waiting keeps waiting", [world.starts, world.timers.length, waiting()], [0, 1, true]);
+  boom = false;
+  await tick();
+  check("and the next look starts it", world.starts, 1);
+}
+
+{
+  const { world, run, waiting } = harness({ running: async () => 4242 });
+  world.installed = true;
+  await run();
+  check("a run already going: no second one, no retry", [world.starts, world.timers.length, waiting()], [0, 0, false]);
+}
+
+{
+  const { world, run, waiting } = harness({ versionInfo: async () => { throw new Error("db down at boot"); } });
+  await run();
+  check("a throw at boot is not a wait", [world.timers.length, waiting()], [0, false]);
 }
 
 {
@@ -109,6 +143,38 @@ function harness(overrides: Partial<AutoExtractDeps> = {}) {
   await run();
   check("refused for another reason: no retry loop", world.timers.length, 0);
 }
+
+// The install itself. Starting on a half-downloaded one fails the run, and a
+// failed run is never retried, so "has the vpk" is not enough.
+function cs2Dir(files: Record<string, string>) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "cs2-"));
+  for (const [rel, body] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    writeFileSync(path.join(dir, rel), body);
+  }
+  return dir;
+}
+const GAME = { "game/csgo/pak01_dir.vpk": "", "game/csgo/steam.inf": "ClientVersion=1\n" };
+const ready = async (files: Record<string, string>) => (await installProblem(cs2Dir(files))) === null;
+check("empty dir is not ready", await ready({}), false);
+check("vpk without steam.inf is not ready", await ready({ "game/csgo/pak01_dir.vpk": "" }), false);
+check("a dir the operator pointed at (no manifest, no build file) is ready", await ready(GAME), true);
+check(
+  "steamcmd done (StateFlags 4) is ready",
+  await ready({ ...GAME, "steamapps/appmanifest_730.acf": '"AppState"\n{\n\t"StateFlags"\t\t"4"\n}\n' }),
+  true,
+);
+check(
+  "steamcmd mid-download (StateFlags 1026) is not",
+  await ready({ ...GAME, "steamapps/appmanifest_730.acf": '"AppState"\n{\n\t"StateFlags"\t\t"1026"\n}\n' }),
+  false,
+);
+check("pinned update running (build file, no manifest yet) is not", await ready({ ...GAME, ".5stack.build": "123" }), false);
+check(
+  "pinned update done (its manifest has no StateFlags) is ready",
+  await ready({ ...GAME, ".5stack.build": "123", "steamapps/appmanifest_730.acf": '"AppState"\n{\n\t"buildid"\t\t"123"\n}\n' }),
+  true,
+);
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);

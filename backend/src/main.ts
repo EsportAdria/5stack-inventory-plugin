@@ -13,7 +13,7 @@ import { pool } from "./db.ts";
 import { parseByteRange } from "./byteRange.mjs";
 import { getIdentity } from "./identity.ts";
 import { isAllowedOrigin, originPolicyFromEnv, refuseCrossSite, requestHost } from "./originGuard.ts";
-import { autoExtractor } from "./autoExtract.ts";
+import { autoExtractor, installProblem } from "./autoExtract.ts";
 import {
   GAME_PLUGIN_SLUG,
   deleteTypeCfg,
@@ -6107,14 +6107,7 @@ async function acquireExtractLock(): Promise<{ ok: true } | { ok: false; error: 
   return { ok: false, error: "Could not claim the extraction lock." };
 }
 
-/** Why an extraction can't start on this node right now, or null. Fresh
- *  installs hit this while the game server is still downloading CS2, so the
- *  auto-run waits on it and the panel shows it. */
-async function cs2InstallProblem(): Promise<string | null> {
-  const vpk = path.join(CS2_DIR, "game", "csgo", "pak01_dir.vpk");
-  if (await fs.access(vpk).then(() => true, () => false)) return null;
-  return `CS2 install not readable at ${CS2_DIR} (looked for game/csgo/pak01_dir.vpk). Mount the game dir into the backend and/or set CS2_DIR.`;
-}
+const cs2InstallProblem = () => installProblem(CS2_DIR);
 
 /** Launch the extraction. Returns an error shape instead of throwing so both
  *  the admin route and the boot-time auto-run can report it their own way. */
@@ -6240,7 +6233,7 @@ app.post("/api/admin/extract-models", async (request, reply) => {
 
 // How often a stale mount waiting on an unreadable CS2 install looks again.
 const AUTO_EXTRACT_RETRY_MS = 5 * 60_000;
-const autoExtractIfStale = autoExtractor({
+const autoExtract = autoExtractor({
   enabled: () => process.env.INVENTORY_AUTO_EXTRACT !== "0",
   versionInfo: extractVersionInfo,
   running: liveExtractionPid,
@@ -6267,7 +6260,7 @@ app.get("/api/admin/extract-models", async (request, reply) => {
     logBytes,
     progress,
     blocked: live ? null : await cs2InstallProblem(),
-    autoExtract: process.env.INVENTORY_AUTO_EXTRACT !== "0",
+    autoExtractWaiting: autoExtract.waiting(),
     workers: await extractWorkerInfo(),
     ...(await extractVersionInfo()),
   };
@@ -6813,7 +6806,7 @@ async function start() {
   // for a moment, and the next request is right — far better than delaying
   // listen() on 63 file reads.
   void warmPatchSlots(getAgents().map((a) => a.model).filter((m): m is string => !!m));
-  void autoExtractIfStale();
+  void autoExtract.run();
   // Prices: warm the index off the mirror already in Postgres, then keep it
   // fresh on the hour. Both fire-and-forget — pricing is an enhancement, and a
   // slow or unreachable feed must never hold up listen() or a single request.
