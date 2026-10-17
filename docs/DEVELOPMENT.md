@@ -247,7 +247,8 @@ CSS build), and restart. Config comes from the convars below, not from a plugin
 config file. 5stack's own server images already ship the plugin; you only need
 this for servers you build yourself.
 
-**⚙ settings → Game Server → Configure my servers** writes this block for you, in one place:
+**⚙ settings → Game Server** (**Install and configure**, or **Configure my
+servers** once the plugin is installed) writes this block for you, in one place:
 
 ```
 invsim_url "https://inventory.5stack.gg"
@@ -440,8 +441,10 @@ Without the installer:
    CS2 dedicated-server install it mounts is complete (**Run extraction** under
    ⚙ settings → 3D Models starts it by hand). It reads the install
    mounted at `/cs2-game` (hostPath `/opt/5stack/serverfiles`). The
-   mount is `DirectoryOrCreate`, so pods run fine without it — the UI detects
-   missing models via 404s and simply never offers 3D rendering. Refreshing
+   models mount is `DirectoryOrCreate`, so pods run fine without it — the UI
+   detects missing models via 404s and simply never offers 3D rendering. The
+   CS2 mount is not: the backend won't start on a node without
+   `/opt/5stack/serverfiles`. Refreshing
    models is a file copy on the node; no rebuild or redeploy.
 6. **Deploy**: from the panel repo, `./custom.sh inventory`.
 7. **Register the plugin** in the panel: Settings → Application → Panel Plugins

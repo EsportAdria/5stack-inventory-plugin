@@ -38,9 +38,9 @@ the **Game Server** tab:
    Simulator plugin is already installed). This installs the plugin on your
    servers and writes its settings for you.
 3. **Open its page to turn them off**, and turn Valve's server guidelines off
-   for the plugin there. Skins don't show in game until you do. The panel asks
-   you to accept the risk first: it applies to every game server token on your
-   Steam account.
+   for the plugin there. Skins don't show in game until you do. Its page warns
+   that this can get every game server token (GSLT) on your Steam account
+   banned.
 
 ## Item art and 3D models
 
