@@ -27,6 +27,7 @@ on:
   push:
     branches:
       - "main"
+      - "test/inventory-recovery-20261017"
   pull_request:
   workflow_dispatch:
 
