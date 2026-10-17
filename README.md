@@ -1,467 +1,75 @@
-# 5stack Inventory Plugin
+# 5stack Inventory
 
-A CS2 inventory simulator that renders **natively inside the 5stack panel** as a
-[plugin](https://github.com/5stackgg). It is **not** part of the 5stack
-brand or codebase — it's an independent micro-frontend, loaded at runtime via
-Module Federation, that reuses 5stack's Steam login instead of its own auth.
+A CS2 inventory and loadout simulator that runs inside your 5stack panel.
+Players craft and equip skins, knives, gloves, agents, stickers and charms, and
+see them in game on your servers.
 
-This repo doubles as the **reference template** for building any 5stack Custom
-Page.
+## Install
 
-## How it fits together
-
-```
-5stack panel (host)                        this plugin
-─────────────────────                      ────────────────
-pages/apps/[...slug].vue ─Module Federation─▶  remoteEntry.js  (Vue "./App")
-  resolves the remote by slug,                  exposes InventoryApp
-  passes :user + the route props
-  renders it in the real sidebar/header
-                                            backend (Fastify)
-cookie ──▶ /plugins/authorize ──▶ identity   validates the session itself,
-                                              owns its `inventory` schema
-```
-
-- **No iframe** — the plugin is a real Vue component in the host's Vue app.
-- **Shared design system** via `@5stack/ui` (Federation shared singleton), so it
-  looks native and tracks the host's live branding.
-- **Identity** comes from handing the inbound 5stack session cookie back to the
-  panel's `/plugins/authorize`, never a cookie parse or Steam OpenID.
-
-## Layout
-
-| Path | What |
-| --- | --- |
-| `src/App.vue` | the loadout UI (exposed `./App` remote; receives the host props) |
-| `src/pluginRouter.ts` | the routing contract — host props in, `go()`/`href()` out |
-| `src/AdminConsole.vue` | the `/admin` route (server key, asset cache, extraction) |
-| `vite.config.ts` | Federation `exposes` + shared singletons |
-| `shared-globals.ts` | resolves `vue` to the panel's instance (replaces Federation `shared`) |
-| `backend/src/catalog.ts` | CS2 item catalog via `@ianlucas/cs2-lib` |
-| `backend/` | Fastify API + `inventory` Postgres schema |
-| `k8s/` | kustomize package — `base/` plus an `http` and an `https` overlay |
-| `public/5stack-plugin.json` | the manifest: what the panel registers, and its `install` block |
-| `codepier.yaml` | live-sync the backend into its pod for dev |
-
-## Plugin routes (the routing contract)
-
-A plugin owns **every URL under its slug**. The panel matches
-`/apps/<slug>/:path*`, resolves the remote from the slug, and passes the rest
-down as props — so a plugin gets real, linkable, back-button-able routes without
-bundling `vue-router` (a second router instance inside a federated remote fights
-the host's for the URL).
-
-| Prop | What the host passes |
-| --- | --- |
-| `user` | the authenticated 5stack user (or `null`) |
-| `base` | where the plugin is mounted, e.g. `/apps/inventory` |
-| `path` | the path *below* the slug — `/` or `/admin` |
-| `query` | the current query object |
-| `navigate` | `(to, { replace?, query? }) => void`, `to` is plugin-relative |
-
-`src/pluginRouter.ts` wraps those into a tiny router and — when the props are
-absent (standalone `npm run dev`) — falls back to the History API, so the same
-call sites work in both modes:
-
-```ts
-const router = usePluginRouter(props);   // props = { base, path, query, navigate }
-
-router.path.value          // "/admin"
-router.query.value.player  // "76561198…"
-router.go("/admin");       // → host router.push("/apps/inventory/admin")
-router.href("/", { player: id });        // absolute, base-aware share link
-```
-
-This plugin maps `/` → loadout, `/focus`, `/items` (owned items), and `/admin` with its own
-sub-routes (`/admin/assets`, `/admin/models`) — the settings side tabs are routes,
-the way the panel's own settings nav works. Screens are
-`computed` off `router.path`, never assigned — the URL is the only source of
-truth, so tabs, deep links and the back button can't disagree.
-
-> Host side: `web/pages/apps/[...slug].vue` — one catch-all page that splits the
-> segments itself (first = plugin slug, rest = plugin path). It delegates the
-> actual federation load to `web/components/plugins/PluginRemote.vue`, which the
-> player-profile tab (below) reuses. Two gotchas worth keeping: a nested optional
-> catch-all (`[slug]/[[...path]].vue`) is mis-parsed by Nuxt into
-> `/apps/:slug()/:path(.*)*]` and matches nothing; and the loader must watch the
-> **slug** only — watching `route.params` remounts the remote on every route the
-> plugin navigates to itself.
-
-## The player-profile tab
-
-A plugin can also mount as a tab on the panel's player pages. Set
-`profileTabLabel` in `5stack-plugin.json` (admins can override it per-site in
-Settings → Application → Plugins); the panel then renders a tab with that label
-on `/players/:steamid`, beside Combat, and mounts the remote inside it.
-
-In that position the host passes two extra query keys:
-
-| Query | Meaning |
-| --- | --- |
-| `player` | the steam64 of the profile being viewed — **not** the logged-in user |
-| `embed` | `"1"` — you are inside someone else's page, not at `/apps/<slug>` |
-
-Both matter, and for different reasons:
-
-- **`player`** is the same flag the shareable `?player=` link already uses, so
-  viewer mode needed no new code — `src/App.vue` loads that player's loadout
-  read-only and blanks `inventory`. Nothing writable is reachable while it's set.
-- **`embed`** is about framing, not permissions. It is *not* the same as
-  `router.embedded` (which only means "mounted in the panel at all", true for
-  both positions). Embedded, the host page already supplies the chrome and owns
-  the page scroll, so we drop the `100dvh` height, the share menu, and the
-  Loadout/Inventory view pill — a lone "Loadout" button pointing at the screen
-  you are already on is just noise.
-
-The tab is read-only **including on your own profile**. At `/apps/inventory`,
-`?player=<me>` deliberately drops you into your real editable inventory; in a
-tab it must not, because the tab is a showcase and the bottom picker sheet
-(owned / craft / replace), drag-to-equip and the slot menus all belong on the
-full page. `load()` skips the usual "that's me, exit viewer mode" shortcut when
-`embed=1`, which is what makes every existing `!viewerId` guard apply here too —
-one condition instead of an embed check on each of them. On your own profile the
-banner links out to the full editor.
-
-Only the **equipped loadout** is shown, never owned items: `GET /api/inventory`
-is hard-scoped to the caller, and the only public per-player endpoints are
-`/api/loadout/:steamId` and `/api/equipped/v5/:steamId`. Showing someone else's
-full collection would need a new endpoint *and* a decision about whether an
-owned-item list should be public at all.
-
-The public loadout carries its **attachments** — stickers, patches and the charm,
-enriched exactly as `/api/inventory` enriches an owned item. It has to: your own
-loadout rows resolve their stickers out of the inventory list they point at, and
-a visitor holds no inventory for the player they are looking at, so a row with
-nothing but an item id renders a bare gun. What it withholds is every row
-*handle* — `item_instance_id` and the `inst` on each attachment both go out null.
-Those name rows in the owner's inventory and the only thing anyone does with one
-is act on it; the placement, the scratch wear and the charm's pattern are all
-inline by then, so nothing on screen needs them.
-
-From that view, **Copy loadout** (`POST /api/loadout/copy-from/:steamId`) mints a
-copy of every equipped skin into your own inventory with `origin='copied'` and
-equips it in the same slot. It confirms first: it does not spend anything, but it
-does overwrite the slots of your own loadout.
-
-The navigation contract is unchanged, but the host wires it differently:
-`navigate` writes **local state** instead of doing a `router.push`. That's the
-whole trick — a push would send the viewer to `/apps/<slug>` the moment they
-clicked anything inside the tab. Only `?tab=<slug>` ever reaches the host URL, so
-plugin sub-navigation stays inside the tab and the profile page never unmounts.
-
-> Host side: `web/pages/players/[id].vue` renders one tab per plugin in
-> `profileTabPlugins` (filtered from `visiblePlugins`, so the plugins master
-> switch, `enabled` and `required_role` all still gate it). The remote is
-> `v-if`-gated on the active tab so a second app isn't fetched over the network
-> until someone asks for it.
-
-This replaced `src/profileLink.ts`, which used to float a "View CS2 Loadout" chip
-onto player pages by monkey-patching `history.pushState`. That file is gone —
-if you're looking for it in git history, this section is what it became.
-
-## How the inventory works
-
-- **Item/skin data** comes from [`@ianlucas/cs2-lib`](https://github.com/ianlucas/cs2-lib)
-  (the same catalog the reference simulator uses). ~27k items — weapons, skins,
-  knives, gloves, agents — with names and rarities. cs2-lib supplies **metadata
-  only**: all artwork is extracted from the instance's own CS2 install onto the
-  models mount and served from `/images` and `/paints`. No third-party CDN is in
-  the serving path, and a missing asset is an error rather than a silent
-  fallback — see `scripts/extract-models.sh`.
-- **Music kit audio** follows exactly that rule, and it is worth stating
-  deliberately because the asset is licensed music rather than artwork: each
-  kit's menu theme is decoded from **this instance's own CS2 install** onto the
-  same mount and served from `/music`. Nothing is redistributed, nothing is
-  fetched from another host, and an instance with no CS2 install simply has no
-  previews. Served with byte ranges, so hearing five seconds costs five seconds
-  of the file rather than all 3.5MB of it.
-- **Loadout model**: one row per `(steam_id, team, slot)` in `inventory.loadout`,
-  where `slot` is a weapon model (`ak47`) or a special slot (`knife`, `gloves`,
-  `agent`, `zeus`, `c4`, `musickit`, `graffiti`, `collectible`, `pet`) and `item_id` is
-  a cs2-lib item id. The set of legal slots lives in **two** places that must
-  agree — `SLOT_RE` in `backend/src/main.ts` and the whitelist in the boot-time
-  `DELETE` in `backend/src/schema.sql`. A slot the API accepts and the SQL
-  forgets gets wiped on the next restart.
-- **Loadout presets**: named builds you switch between (five, like CS2). The
-  shape is deliberately lopsided — the preset you are *wearing* has no rows of
-  its own, its slots **are** `inventory.loadout`; only the ones you are not
-  wearing park their slots in `inventory.loadout_preset_slots`, and activating
-  swaps the two sets over in a transaction. That is what keeps
-  `/api/equipped/v5` — the read every game server makes for every player on
-  every connect — the same single indexed lookup it always was, and it is why no
-  other loadout query learned that presets exist. Duplicating a preset does
-  **not** clone your items: both presets point at the same owned instances,
-  because crafting is the gate and a preset is only an arrangement of what you
-  already own. Deleting an owned item therefore empties that slot in *every*
-  preset (`ON DELETE CASCADE` on both tables) — the loadout is craft-gated, so a
-  slot whose instance is gone has nothing legal left to hold.
-- **Craft attributes are validated per ITEM, not per type** (`validateCraftAttrs`
-  in `backend/src/catalog.ts`). cs2-lib knows each finish's real float range, and
-  most of them are not 0..1: **1,683 of the 2,106 paintable items are narrower**
-  (AK-47 | Redline is 0.10–0.70, Desert Eagle | Blaze is 0.00–0.08). It also
-  knows that the 68 vanilla weapons have no float, no pattern and no StatTrak at
-  all, which a type-level rule cannot express. Values are truncated to the
-  game's own quantization step *before* validating, because an 0.01 browser
-  slider emits `0.30000000000000004` and rejecting that would be rejecting the
-  user's honest input. The craft editor's slider reads the same bounds off the
-  catalog listing (`wearMin`/`wearMax`), so the UI and the door agree.
-- **API**:
-  - `GET /api/catalog` → base weapons (grouped by category client-side) + agents
-  - `GET /api/catalog/skins?slot=<model|knife|gloves|agent|musickit|graffiti|collectible|pet>`
-    → skins for a slot
-  - `GET /api/loadout` → the user's equipped slots (enriched with item name/image)
-  - `POST /api/loadout` `{team, slot, item_id}` → equip
-  - `DELETE /api/loadout?team=&slot=` → unequip
-  - `GET /api/loadout/presets` → the caller's named builds (mints their first)
-  - `POST /api/loadout/presets` `{name?, copy?}` → create; `copy` seeds it from
-    the build you are wearing
-  - `PATCH /api/loadout/presets/:id` `{name}` → rename
-  - `POST /api/loadout/presets/:id/activate` → wear it
-  - `DELETE /api/loadout/presets/:id` → delete (moves you to another build; the
-    last one is not deletable)
-- The UI has a CT/T toggle, special-equipment slots, weapon sections by category,
-  and a skin picker. Knife/gloves apply to both teams; agents are per-team.
-
-## Game-server API
-
-Game servers run one of ianlucas' inventory-simulator plugins and talk to us
-over three endpoints. Pick the build that matches the server's mod framework —
-they speak the same protocol and the same convars, so the rest of this section
-applies to either:
-
-| Server framework   | Plugin                                                     |
-| ------------------ | ---------------------------------------------------------- |
-| Metamod / SourceMod (ss2) | [`ianlucas/cs2-ss2-inventory-simulator`][invsim]    |
-| CounterStrikeSharp | [`ianlucas/cs2-css-inventory-simulator`][invsim-css]        |
-
-Install it from your panel's **Plugin Directory** (`/plugins/inventory-simulator`)
-and every node downloads the release, checks it against the registry's digest,
-and unpacks it for you. The Game Server tab in this plugin's admin console
-offers to do that in one press. Failing that, grab the latest release zip from
-the repo above, unpack it into the server's plugin directory (`addons/` —
-`sourcemod/`+`metamod/` for the ss2 build, `counterstrikesharp/plugins/` for the
-CSS build), and restart. Config comes from the convars below, not from a plugin
-config file. 5stack's own server images already ship the plugin; you only need
-this for servers you build yourself.
-
-**Settings → Game Server → Configure** writes this block for you, in one place:
-
-```
-invsim_url "https://inventory.5stack.gg"
-invsim_apikey "inv_…"
-invsim_ws_enabled 1
-invsim_ws_immediately 1
-invsim_require_inventory 1
-invsim_spraychanger_enabled 1
-```
-
-Where it lands depends on the panel, best first:
-
-| Target | When | Applies to |
-| --- | --- | --- |
-| The CS2 plugin's own config | it is installed from the plugin directory | servers that load the plugin |
-| The panel's **Global** config | the plugin is installed by hand | every match |
-| Competitive / Wingman / Duel | a panel with no Global config | those match types |
-
-Nothing is written until an administrator presses the button. Earlier versions
-prepended the block to the Competitive, Wingman and Duel rows on every admin
-page load; configuring now takes that copy back out, leaving the cvars in one
-place instead of three.
-
-| Method | Path                             | Auth               |
-| ------ | -------------------------------- | ------------------ |
-| GET    | `/api/equipped/v5/<steamid>.json` | **none**           |
-| POST   | `/api/increment-item-stattrak`   | `apiKey` in body   |
-| POST   | `/api/sign-in`                   | `apiKey` in body   |
-
-Three things about this protocol are counter-intuitive and have each cost a
-debugging session:
-
-- **`invsim_ws_*` is not WebSockets.** `ws` means *weapon skin* — the `!ws` chat
-  command that re-fetches a player's inventory over plain HTTP. There is no
-  WebSocket anywhere in the plugin.
-- **`invsim_require_inventory` is load-bearing, not optional.** Skins are baked
-  into the weapon by a native `GiveNamedItem` detour at the moment the engine
-  creates it — there is no spawn or team hook, and nothing re-evaluates a weapon
-  that already exists. The inventory fetch is async HTTP fired at connect, and
-  5stack auto-assigns a team and force-respawns ~100ms later, which beats the
-  round-trip: the weapons get built vanilla and the player only sees their skins
-  after their first death. This convar defers activation until the fetch lands.
-  The trade-off is that a slow or unreachable backend now hangs players at
-  connect instead of spawning them skinless.
-- **`invsim_apikey` is never an HTTP header**, and the equipped `GET` sends no
-  credential at all — it is a bare `GetAsync`. That endpoint must stay publicly
-  readable by SteamID64. Putting the ingress' 5stack forward-auth in front of
-  `/api` returns a `401` nginx HTML page to every game server, which reads like
-  a bad API key but never reaches this process. See the warning in
-  [the plugin backend docs][authdocs].
-
-`/api/sign-in` and its browser-facing `/api/sign-in/callback` page are **not
-implemented yet** — only relevant if a server enables `invsim_wslogin`
-(defaults off).
-
-### What the v5 payload has to get right
-
-`/api/equipped/v5` is generated field-for-field against upstream's `docs/api.md`
-and the plugin's `src/Models/InventoryItem.cs`. Four of those fields are quiet
-failure modes rather than cosmetic mismatches:
-
-- **`hash`** is the plugin's *only* change-detection signal —
-  `InventoryItem.Equals` compares nothing else, and `RegiveAgent` /
-  `RegiveGloves` / `RegiveWeapons` all bail on `oldItem == item`. It is computed
-  over the whole entry, so anything added to the payload is covered
-  automatically. A hash over a hand-picked subset means `!ws` cannot apply
-  whatever it left out until the player respawns.
-- **`keychains[].sticker`** names the sticker a Sticker Slab displays. 11,144 of
-  the 11,224 charms in the catalog are slabs, and the charm's own `def` only
-  picks the hanger — without this every slab in the game arrives blank.
-- **`graffiti.tint`** must be `?? 0`, never omitted. The plugin's
-  `SprayGraffiti()` returns early when `Tint` is null, and 438 of the 2,205
-  graffiti carry no tint of their own — so an omitted field is a spray that
-  silently does nothing.
-- **`pet.upgradeLevel`** always goes out, even at the pet's default. The plugin
-  deploys a pet whose level is unset as a grown one, so an egg that omitted it
-  would hatch on spawn. `pet.style` is the one pet field left off when unset
-  (the stock look), and `pet.seed` is read as the "pet seed" attribute — not a
-  paint seed — because `petId` is present
-  ([cs2-css-inventory-simulator#150][invsim-pets]).
-- **`charges`** is *deliberately absent*. Upstream uses it to make graffiti a
-  consumable (50 sprays, then the item is gone); a missing `charges` is the
-  plugin's "unlimited", which is what a loadout sandbox wants. That is also why
-  there is no `/api/consume-item-spray` here.
-- **`loadout`** (`{ team: { loadout_slot_t: weaponDef } }`) replaces the
-  player's gun slots with the grid. Without it the plugin keeps the player's own
-  CS2 loadout and swaps skins in by def alone, so a skin on a gun that loadout
-  doesn't carry (an M4A1-S for someone on the M4A4, an R8, a CZ) never showed
-  ([cs2-ss2-inventory-simulator#60][invsim-loadout]). A team the player has set
-  up here (any grid row, skin or free default) goes out whole: all 15 positions
-  (`sp`/`p1-p4` → 2-6, `m1-m5` → 8-12, `r1-r5` → 14-18), with empty ones filled
-  from Valve's defaults in `backend/src/loadoutGrid.ts`, the same table the
-  panel draws empty cells from. A team they never touched is left out and keeps
-  their own CS2 loadout. Servers can opt out with `invsim_loadout_enabled 0`.
-
-[invsim]: https://github.com/ianlucas/cs2-ss2-inventory-simulator
-[invsim-loadout]: https://github.com/ianlucas/cs2-ss2-inventory-simulator/pull/60
-[invsim-css]: https://github.com/ianlucas/cs2-css-inventory-simulator
-[invsim-pets]: https://github.com/ianlucas/cs2-css-inventory-simulator/pull/150
-[authdocs]: https://docs.5stack.gg/plugins/backend#optional-forward-auth-at-the-ingress
-
-## Development (in-cluster, via CodePier)
-
-Dev runs **inside the cluster** behind the real ingress, so there are no env
-vars, no CORS to configure, and session-cookie identity + same-origin `/api`
-just work. `codepier.yaml` lists both workloads, so `codepier up` lets you pick which
-one to hot-swap.
-
-```bash
-# Frontend (build --watch + serve on :80)
-codepier up --deployment inventory-frontend
-codepier ssh   # then:  yarn dev:ui
-
-# Backend (node --watch hot reload)
-codepier up --deployment inventory-backend
-codepier ssh   # then:  yarn dev:api
-```
-
-Edit locally; CodePier syncs and the `--watch` rebuild/restart happens in the
-pod. The frontend is a Module Federation **remote**, so it must be *built* to
-produce `remoteEntry.js` (a plain `vite` dev server can't serve one) — `dev:ui`
-does the build-watch + serve in one command.
-
-> Pin `vue`, `reka-ui`, `pinia`, `@5stack/ui` to the **same versions** the panel
-> (`web`) uses, or Federation loads a second copy and reactivity breaks.
-
-## Installing on an existing 5stack site
-
-From your `5stack-panel` checkout:
+On the machine your 5stack panel runs on, from your `5stack-panel` folder:
 
 ```bash
 ./plugin.sh https://github.com/lukepolo/5stack-inventory-plugin
 ```
 
-That's it. The panel already knows this site, so the installer reads rather than
-asks: the kubeconfig, your `WEB_DOMAIN` (the host defaults to
-`inventory.<your domain>`), the Postgres connection string copied out of the
-cluster, and — from `REVERSE_PROXY` — **which of the two installs below you
-need**. Then it labels a node, applies, and tells you what's left (DNS, cert,
-registration). Re-run it to upgrade; your answers are kept.
+Press Enter at each question to keep the default. When it finishes:
 
-| | |
+1. **DNS:** point the host it printed (`inventory.<your panel's domain>` by
+   default) at the same address as your panel.
+2. **Register it:** in the panel, **Settings → Application → Panel Plugins →
+   Add**, paste `https://<that host>`, press **Detect**, then save.
+
+Inventory now shows in the panel's sidebar.
+
+## Skins on your game servers
+
+On the Inventory page, an administrator opens the **⚙ settings** button, then
+the **Game Server** tab:
+
+1. **Generate key**.
+2. **Install and configure**. This installs the CS2 Inventory Simulator plugin
+   on your servers and writes its settings for you.
+
+## Item art and 3D models
+
+They are extracted from your own CS2 install the first time the plugin starts.
+It takes a while; watch it under **⚙ settings → 3D Models**.
+
+The inventory has to run on a machine that hosts your game servers, because that
+is where CS2 is installed.
+
+## Updating
+
+From your `5stack-panel` folder:
+
+```bash
+git pull && ./update.sh
+./plugin.sh https://github.com/lukepolo/5stack-inventory-plugin
+kubectl -n 5stack rollout restart deployment/inventory-backend deployment/inventory-frontend
+```
+
+Your answers from the first install are kept. The last line is what picks up the
+new version.
+
+## Troubleshooting
+
+| You see | Fix |
 | --- | --- |
-| `k8s/overlays/http` | TLS terminated in front of the cluster — Cloudflare proxy/tunnel or any reverse proxy. No certificate. |
-| `k8s/overlays/https` | TLS terminated at the cluster's nginx. Adds a cert-manager `Certificate` for the plugin's host, issued by the panel's `5stack-issuer`. |
+| A CORS error ending in *must not be the wildcard '\*'* | Update (above). The installer tells the plugin your panel's domain. |
+| Nobody is signed in on the Inventory page | The plugin's host has to sit under your panel's domain. Re-run `./plugin.sh` and take the host it offers. |
+| **3D Models** says *CS2 install not readable at /cs2-game* | The inventory is on a machine without CS2. Move it to one of your game-server machines (below). |
 
-`public/5stack-plugin.json` is what drives it — its `install` block names those
-two overlays and the values the installer fills in. The format is at
-[docs.5stack.gg/plugins/installing](https://docs.5stack.gg/plugins/installing).
+To move the inventory to another machine, see where it is now with
+`kubectl get nodes -L 5stack-inventory`, then:
 
-### By hand
+```bash
+kubectl label node <current machine> 5stack-inventory-
+kubectl label node <game-server machine> 5stack-inventory=true
+./plugin.sh https://github.com/lukepolo/5stack-inventory-plugin
+kubectl -n 5stack rollout restart deployment/inventory-backend deployment/inventory-frontend
+```
 
-1. **Build & push** both images:
-   ```bash
-   docker build -f Dockerfile.frontend -t ghcr.io/lukepolo/5stack-inventory-plugin-frontend:latest .
-   docker build -f Dockerfile.backend  -t ghcr.io/lukepolo/5stack-inventory-plugin-backend:latest .
-   docker push ghcr.io/lukepolo/5stack-inventory-plugin-frontend:latest
-   docker push ghcr.io/lukepolo/5stack-inventory-plugin-backend:latest
-   ```
-2. **Drop `k8s/` into the panel** at `5stack-panel/custom/inventory/`. The
-   directory name matters: `custom.sh` derives the node label as
-   `5stack-<dirname>`, and the deployments pin to `5stack-inventory`.
-   `k8s/kustomization.yaml` defaults to the HTTP install — point it at
-   `overlays/https` if your panel terminates TLS at the cluster.
-3. **Configure** (both files live in `k8s/base/`):
-   - `inventory.env` → `INVENTORY_DOMAIN` (e.g. `inventory.yoursite.gg`), and
-     your panel's `WEB_DOMAIN` (e.g. `yoursite.gg`) plus `AUTH_COOKIE_DOMAIN`
-     if its api sets one. Without them, a panel beside the plugin's host
-     (`cs.yoursite.gg` next to `inventory-cs.yoursite.gg`) is refused.
-   - `inventory-secrets.env` (copy from `inventory-secrets.env.example`) →
-     `DATABASE_URL`. The plugin creates and owns an **`inventory` schema** (not
-     a separate database) and schema-qualifies every query, so this is normally
-     just a copy of the panel's own connection string:
-     ```bash
-     kubectl -n 5stack get secret -o name | grep timescaledb-secrets
-     kubectl -n 5stack get secret <that-name> \
-       -o jsonpath='{.data.POSTGRES_CONNECTION_STRING}' | base64 -d
-     ```
-     It's copied rather than referenced on purpose. The panel generates
-     `timescaledb-secrets` with kustomize's `secretGenerator`, so its real name
-     carries a content hash (`timescaledb-secrets-dfbc69dbh5`), and `custom.sh`
-     builds this package standalone — with no view of that generator, a
-     reference to the bare name wouldn't be rewritten and would resolve to
-     nothing. Note this means the copy doesn't follow a panel password
-     rotation; re-copy it if you rotate.
-4. **Apply the schema** — `npm run migrate` in `backend/` (or run
-   `backend/src/schema.sql`). It only does `CREATE SCHEMA inventory` + its
-   tables; no database creation needed. The connecting role must be allowed to
-   create a schema.
-5. **3D models (optional)** — the frontend deployment expects a hostPath mount
-   at **`/opt/5stack/models/cs2-model-extract`** on the node (mounted read-only
-   at `/cs2-models`; `/models/*` is served from its `models/` subfolder).
-   Populate it with `scripts/extract-models.sh` run against a CS2 install —
-   or just hit "extract models" in the plugin's admin settings, which runs the
-   same script in the backend pod against the CS2 dedicated-server install
-   mounted at `/cs2-game` (hostPath `/opt/5stack/serverfiles`). The
-   mount is `DirectoryOrCreate`, so pods run fine without it — the UI detects
-   missing models via 404s and simply never offers 3D rendering. Refreshing
-   models is a file copy on the node; no rebuild or redeploy.
-6. **Deploy**: from the panel repo, `./custom.sh inventory`.
-7. **Register the plugin** in the panel: Settings → Application → Plugins → Add,
-   with:
-   - **Slug**: `inventory`
-   - **Remote Entry URL**: `https://inventory.yoursite.gg/assets/remoteEntry.js`
-   - **Remote Scope**: `inventory`
-   - **Exposed Module**: `./App`
-   - **Required Role**: (optional — leave blank for public)
-   - toggle **Enabled**, and enable the **Plugins** master switch.
+## Changing the plugin
 
-The page now appears in the panel nav at `/apps/inventory`, rendered natively.
-
-## The identity contract (for building your own plugin)
-
-Host your backend on a subdomain of the panel, so the browser attaches the
-5stack session cookie. Forward that cookie to
-`http://api.5stack.svc.cluster.local:5585/plugins/authorize` and a `200` returns
-`{ steam_id, role, name }` for the calling user; anything else is anonymous (see
-`backend/src/identity.ts`, which also caches the lookup for a few seconds).
-Expose your Vue root as a Federation module and register it as a plugin — that's
-the whole framework.
+How it works, the game-server API, local development and installing by hand are
+in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).

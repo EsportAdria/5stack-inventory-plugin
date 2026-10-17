@@ -752,10 +752,10 @@ async function shareArtFor(facts: ShareFacts | null, version: number): Promise<S
  *
  * /api/loadout/:steamId is public by design — an equipped loadout is already
  * public, because /api/equipped/v5 hands the same items to any game server that
- * asks with no credential at all. What a player merely OWNS is not, and the
- * README is explicit that an owned-item list would need a decision before it got
- * a route. An image endpoint that answered for any instance id would be that
- * route in pictures, reachable by counting.
+ * asks with no credential at all. What a player merely OWNS is not, and
+ * docs/DEVELOPMENT.md is explicit that an owned-item list would need a decision
+ * before it got a route. An image endpoint that answered for any instance id
+ * would be that route in pictures, reachable by counting.
  *
  * So a row answers only while it is equipped in the live loadout — precisely the
  * set /api/loadout/:steamId already discloses. Anything else reads as unknown
@@ -975,7 +975,7 @@ function flatQuery(raw: unknown): Record<string, string> {
  * a share link into an open redirect to wherever the last attacker pointed it.
  *
  * The base is `/apps/<slug>` with the slug from 5stack-plugin.json, which is the
- * contract the host implements (see the routing section of the README).
+ * contract the host implements (see the routing section of docs/DEVELOPMENT.md).
  */
 function panelShareUrl(pluginPath: string, query: URLSearchParams): string | null {
   const panel = (process.env.FIVESTACK_PANEL_URL ?? "").replace(/\/+$/, "");
@@ -3515,7 +3515,7 @@ function withoutInstanceHandle<T extends { inst?: string | null } | null>(a: T):
 // loadout is already public — /api/equipped/v5 hands the same items to any game
 // server that asks, with no credential — and this is the shareable, human-facing
 // form of it. What is NOT public is anything a player merely owns; see the
-// README for why an owned-item list needs a decision before it gets a route.
+// docs/DEVELOPMENT.md for why an owned-item list needs a decision before it gets a route.
 // Every preset a player has, for a VISITOR. Same rows and same shape the owner
 // sees — id, name, active, filled-slot count — because none of that is private:
 // a preset is an arrangement of items, and this endpoint has always disclosed
