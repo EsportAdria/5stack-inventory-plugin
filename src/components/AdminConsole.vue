@@ -2044,7 +2044,19 @@ const BTN_DANGER =
                      its own callout above: one action, one place. A separate
                      banner made a single re-run read as a second problem. -->
                 <p class="min-w-[16rem] flex-1 space-y-0.5 text-xs">
-                  <span v-if="extractStatus.stale" class="block font-medium text-[hsl(var(--tac-amber))]">
+                  <!-- Ahead of "Never run": pressing the button can't help until
+                       the install is there, and the backend log was the only
+                       place that said so. -->
+                  <template v-if="extractStatus.blocked">
+                    <span class="block font-medium text-destructive">{{ extractStatus.blocked }}</span>
+                    <span
+                      v-if="extractStatus.stale && extractStatus.autoExtract && extractStatus.state !== 'failed'"
+                      class="block text-muted-foreground"
+                    >
+                      Starts by itself once it is — checked every 5 minutes.
+                    </span>
+                  </template>
+                  <span v-else-if="extractStatus.stale" class="block font-medium text-[hsl(var(--tac-amber))]">
                     {{
                       extractStatus.extracted === false
                         ? "Never run — item art and 3D stay hidden until it does."

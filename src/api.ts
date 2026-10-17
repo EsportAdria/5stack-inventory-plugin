@@ -1315,6 +1315,12 @@ export interface ExtractStatus {
   requiredVersion?: number | null;
   extracted?: boolean;
   stale?: boolean;
+  /** Why a run can't start on this node right now (its CS2 install isn't
+   *  readable), or null. `autoExtract` is INVENTORY_AUTO_EXTRACT not being 0:
+   *  a stale mount then starts by itself once nothing blocks it. Both absent on
+   *  older backends. */
+  blocked?: string | null;
+  autoExtract?: boolean;
   /** Wall-clock of the last successful run, and the per-step breakdown of it.
    *  Null on mounts stamped before v5 — "unknown", not zero. */
   lastRunSeconds?: number | null;

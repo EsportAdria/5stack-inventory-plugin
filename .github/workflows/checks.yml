@@ -122,6 +122,11 @@ jobs:
       - name: Only the panel can act as a player
         run: npm run check:origin
 
+      # Silent the same way: a refused boot run only logged a warning, and the
+      # panel sat on "Never run" with item art hidden.
+      - name: A stale mount extracts itself once CS2 is installed
+        run: npm run check:auto-extract
+
   # NOT in the job above: tools/charmsim-check.ts needs a directory of
   # *.phys.json from the extracted CS2 assets, which no clean runner has. Run it
   # by hand against a mount with `npm run check:charmsim -- <dir>`. Splitting it
