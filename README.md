@@ -57,7 +57,7 @@ new version.
 | --- | --- |
 | A CORS error ending in *must not be the wildcard '\*'* | Update (above). The installer tells the plugin your panel's domain. |
 | Nobody is signed in on the Inventory page | The plugin's host has to sit under your panel's domain. Re-run `./plugin.sh` and take the host it offers. |
-| **3D Models** says *CS2 install not readable at /cs2-game* | The inventory is on a machine without CS2. Move it to one of your game-server machines (below). |
+| **3D Models** says *No CS2 install at /cs2-game* (or *CS2 install not readable*) | The inventory is on a machine without CS2. Move it to one of your game-server machines (below). |
 
 To move the inventory to another machine, see where it is now with
 `kubectl get nodes -L 5stack-inventory`, then:
