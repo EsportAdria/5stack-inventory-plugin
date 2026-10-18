@@ -28,6 +28,7 @@ on:
     branches:
       - "main"
       - "test/inventory-recovery-20261017"
+      - "test/inventory-memory-20261018"
   pull_request:
   workflow_dispatch:
 
