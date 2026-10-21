@@ -101,6 +101,15 @@ export interface CatalogSkin {
   collection?: string;
   /** Artwork identity shared by every colour variant — the STACK key. */
   design?: number;
+  /**
+   * KNIVES and GLOVES only: the bare model every finish of the kind is painted
+   * onto — "Butterfly Knife", "Bloodhound Gloves". The craft sheet sections its
+   * finishes by it. For gloves that model is not an item on the list (see
+   * getGloves), so it has to be named here.
+   */
+  baseId?: number;
+  baseName?: string;
+  baseImage?: string | null;
   /** Colourway id, for the items that come in more than one. */
   tint?: number;
   /** That colourway's name ("Cash Green"). */
@@ -113,6 +122,9 @@ export interface CatalogSkin {
    * worse than the silence it replaced.
    */
   audio?: string | null;
+  /** MUSIC KITS only: the round-MVP anthem, the same way. Null before an
+   *  extraction that pulled it (pipeline v37). */
+  mvpAudio?: string | null;
   // ---- per-item attribute facts, for the craft editor's controls ------------
   // Only the paintable listings carry these; see wearRange below for why they
   // are not derivable from `type`.
@@ -347,8 +359,34 @@ export function getAgents() {
     }));
 }
 
+/**
+ * modelKey -> the bare model of that kind, as the `base*` facts of a listing.
+ *
+ * Every knife and glove finish shares its modelKey with exactly one item that
+ * has no paint index — the model itself — so this is a lookup, not a guess.
+ */
+function baseFacts(type: "melee" | "glove") {
+  const bases = new Map(
+    items.filter((i) => i.type === type && !i.variantIndex && !i.isDefault).map((b) => [b.modelKey, b]),
+  );
+  return (i: (typeof items)[number]): Pick<CatalogSkin, "baseId" | "baseName" | "baseImage"> => {
+    const b = bases.get(i.modelKey);
+    return b ? { baseId: b.id, baseName: b.name.replace(/^★\s*/, ""), baseImage: img(b.imagePath) } : {};
+  };
+}
+
+/**
+ * Knife finishes, plus the vanilla knives — "★ Butterfly Knife" with no finish
+ * is a real item, and it sits in its own model's group.
+ *
+ * The stock T and CT knives are not offered: like the stock gloves they are the
+ * slot's default (getDefaults reads them), not something to craft.
+ */
 export function getKnives(): CatalogSkin[] {
-  return items.filter((i) => i.type === "melee").map(paintedListing);
+  const base = baseFacts("melee");
+  return items
+    .filter((i) => i.type === "melee" && !i.isDefault)
+    .map((i) => ({ ...paintedListing(i), ...base(i) }));
 }
 
 // ---- Music kit audio --------------------------------------------------------
@@ -367,23 +405,28 @@ export function getKnives(): CatalogSkin[] {
 // would advertise previews that 404.
 const MUSIC_DIR = process.env.MUSIC_DIR ?? "/cs2-models/music";
 const MUSIC_INDEX = path.join(MUSIC_DIR, "music-kits.json");
+// The MVP anthems' own manifest (pipeline v37), so a mount without it simply
+// has no anthem and every theme keeps working.
+const MUSIC_MVP_INDEX = path.join(MUSIC_DIR, "music-mvp.json");
 // The value becomes a public URL, so it is validated here rather than trusted —
 // the extractor writes this file, but this is the point where it stops being
 // our data and starts being a path.
 const MUSIC_FILE = /^[\w.-]+\.(mp3|wav)$/;
-let musicCache: { mtimeMs: number; map: Record<string, string> } | null = null;
+const musicCache = new Map<string, { mtimeMs: number; map: Record<string, string> }>();
 
-/** variantIndex -> audio filename, or {} on a mount without the step. */
-function musicIndex(): Record<string, string> {
+/** variantIndex -> audio filename, or {} on a mount without the step. `file`
+ *  picks the manifest: the menu themes, or (MUSIC_MVP_INDEX) the MVP anthems. */
+function musicIndex(file = MUSIC_INDEX): Record<string, string> {
   try {
-    const { mtimeMs } = statSync(MUSIC_INDEX);
-    if (musicCache?.mtimeMs === mtimeMs) return musicCache.map;
-    const doc = JSON.parse(readFileSync(MUSIC_INDEX, "utf8")) as Record<string, unknown>;
+    const { mtimeMs } = statSync(file);
+    const hit = musicCache.get(file);
+    if (hit?.mtimeMs === mtimeMs) return hit.map;
+    const doc = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
     const map: Record<string, string> = {};
-    for (const [index, file] of Object.entries(doc)) {
-      if (typeof file === "string" && MUSIC_FILE.test(file)) map[index] = file;
+    for (const [index, name] of Object.entries(doc)) {
+      if (typeof name === "string" && MUSIC_FILE.test(name)) map[index] = name;
     }
-    musicCache = { mtimeMs, map };
+    musicCache.set(file, { mtimeMs, map });
     return map;
   } catch {
     // No mount, or one extracted before v28. Every kit answers null, and the UI
@@ -403,6 +446,7 @@ export function getMusicKits(): CatalogSkin[] {
   // Read once for the whole listing rather than per kit: this is a stat plus a
   // parse, and it is the same answer for all 100 rows.
   const audio = musicIndex();
+  const mvp = musicIndex(MUSIC_MVP_INDEX);
   return items
     .filter((i) => i.type === "musickit")
     .map((m) => ({
@@ -413,6 +457,7 @@ export function getMusicKits(): CatalogSkin[] {
       type: m.type,
       def: m.definitionIndex,
       audio: musicAudio(audio, m.variantIndex),
+      mvpAudio: musicAudio(mvp, m.variantIndex),
     }));
 }
 
@@ -894,8 +939,22 @@ export function getItemsByIds(ids: number[]): (CatalogSkin & {
   return out;
 }
 
+/**
+ * Glove FINISHES — the 94 that exist as items.
+ *
+ * A glove is never an item without its finish: "Bloodhound Gloves" on its own
+ * is the model every Bloodhound finish is painted onto, not something anyone
+ * can own. cs2-lib still lists the eight bare models, and the two stock pairs,
+ * as glove items; offered here they made the craft sheet a list of things the
+ * game has no such item for. The stock pairs are still the slot's default —
+ * getDefaults reads them separately — and an owned instance of any of the ten
+ * still resolves, since nothing here touches getItem.
+ */
 export function getGloves(): CatalogSkin[] {
-  return items.filter((i) => i.type === "glove").map(paintedListing);
+  const base = baseFacts("glove");
+  return items
+    .filter((i) => i.type === "glove" && !!i.variantIndex)
+    .map((i) => ({ ...paintedListing(i), ...base(i) }));
 }
 
 /**
@@ -1130,6 +1189,7 @@ export function getDefaults() {
           // resolver the owned-item shape uses, so the two can't disagree about
           // which track belongs to which kit.
           audio: i.type === "musickit" ? musicAudio(musicIndex(), i.variantIndex) : undefined,
+          mvpAudio: i.type === "musickit" ? musicAudio(musicIndex(MUSIC_MVP_INDEX), i.variantIndex) : undefined,
         }
       : null;
   const perTeam = (type: string) => {
@@ -1472,6 +1532,7 @@ export function getItem(id: number) {
       // through, so without it a kit would preview in the picker (which reads
       // the catalog listing) and fall silent the moment it was yours.
       audio: i.type === "musickit" ? musicAudio(musicIndex(), i.variantIndex) : undefined,
+      mvpAudio: i.type === "musickit" ? musicAudio(musicIndex(MUSIC_MVP_INDEX), i.variantIndex) : undefined,
       // This is the resolver every OWNED instance comes through, so it is what
       // lets the inventory grid and the loadout sheet sort by collection at all
       // — the catalog listings alone only cover things you haven't crafted yet.

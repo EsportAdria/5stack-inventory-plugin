@@ -143,6 +143,50 @@ export function slotCount(slots: StickerSlot[], mesh = "body_hd"): number {
   return slots.filter((s) => s.mesh === mesh).length;
 }
 
+// ---- Sticker masks ------------------------------------------------------------
+//
+// Where a sticker may SHOW on each body: csgo_weapon's g_tStickerWepInputs
+// (R = mask, G = cavity), in the body's UV0 — not the TEXCOORD_1 the anchors
+// above are in (see applyStickerMask in the frontend for how that was measured).
+// The game draws stickers through it, so whatever is modelled over the sticker
+// band — the C4's LCD module, wires and tape — hides the part of a sticker under
+// it. extract-models.sh §3d2 writes one image per body beside the GLBs and
+// indexes them in sticker-masks.json; absent before v34, which reads as "no
+// mask", i.e. stickers drawn whole, as before.
+
+/** Mask file per body, as a bare filename under /models. */
+export type StickerMasks = Partial<Record<"body_hd" | "body_legacy", string>>;
+
+const MASKS_FILE = path.join(MODELS_DIR, "sticker-masks.json");
+let masksCache: { mtimeMs: number; masks: Record<string, StickerMasks> } | null = null;
+/** A filename the extraction could have written, and nothing that could leave
+ *  /models — the value is spliced into a URL. */
+const MASK_FILE_RE = /^[\w.-]+\.stickermask\.(hd|legacy)\.(webp|png|tga)$/;
+
+/** The sticker mask per body for a weapon, or {} when the mount has none.
+ *  Never throws. */
+export async function getStickerMasks(model: string): Promise<StickerMasks> {
+  try {
+    const { mtimeMs } = await stat(MASKS_FILE);
+    if (!masksCache || masksCache.mtimeMs !== mtimeMs) {
+      const doc = JSON.parse(await readFile(MASKS_FILE, "utf8")) as Record<string, Record<string, unknown>>;
+      const masks: Record<string, StickerMasks> = {};
+      for (const [key, bodies] of Object.entries(doc)) {
+        const m: StickerMasks = {};
+        for (const body of ["body_hd", "body_legacy"] as const) {
+          const f = bodies?.[body];
+          if (typeof f === "string" && MASK_FILE_RE.test(f)) m[body] = f;
+        }
+        masks[key] = m;
+      }
+      masksCache = { mtimeMs, masks };
+    }
+    return masksCache.masks[model] ?? {};
+  } catch {
+    return {};
+  }
+}
+
 // ---- Charm placement surfaces (KeychainMarkup) ------------------------------
 //
 // The sticker markup's counterpart for charms, out of the same DATA block and
@@ -353,6 +397,21 @@ export interface CharmShading {
    * and a param this file filtered out would be invisible to diagnose.
    */
   liquid?: Record<string, unknown>;
+  /**
+   * A detail texture over the albedo (csgo_weapon's F_DETAIL_TEXTURE): mode 0
+   * multiplies, 1 replaces; placed by its own scale / rotation / authored
+   * offset; with `maskByTint`, only where the tint mask is. Charm | 8 Ball IGL's
+   * fortune triangle is one.
+   */
+  detail?: {
+    tex: string;
+    mode: number;
+    blend: number;
+    scale: [number, number];
+    offset: [number, number];
+    rotation: number;
+    maskByTint: boolean;
+  };
 }
 
 const CHARM_FILE = path.join(MODELS_DIR, "charm-models.json");
@@ -392,6 +451,25 @@ export async function getCharmShading(): Promise<Record<string, CharmShading>> {
         // far better than no liquid at all.
         if (typeof liquid.mask === "string" && !liquid.mask.startsWith("/textures/")) delete liquid.mask;
         out.liquid = liquid;
+      }
+      const d = e.detail as Record<string, unknown> | undefined;
+      // Whole or nothing, and path-checked like tintMask: a detail with a NaN in
+      // its placement would sample nowhere and paint the window one colour.
+      if (d && typeof d.tex === "string" && d.tex.startsWith("/textures/")) {
+        const pair = (v: unknown, dflt: number): [number, number] => {
+          const a = Array.isArray(v) ? v.map(Number) : [];
+          return [Number.isFinite(a[0]) ? a[0] : dflt, Number.isFinite(a[1]) ? a[1] : dflt];
+        };
+        const blend = Number(d.blend);
+        out.detail = {
+          tex: d.tex,
+          mode: Number(d.mode) === 1 ? 1 : 0,
+          blend: Number.isFinite(blend) ? blend : 1,
+          scale: pair(d.scale, 1),
+          offset: pair(d.offset, 0),
+          rotation: Number.isFinite(Number(d.rotation)) ? Number(d.rotation) : 0,
+          maskByTint: d.maskByTint === true,
+        };
       }
       if (Object.keys(out).length) map[stem] = out;
     }

@@ -14,12 +14,12 @@
 //
 // Skin rendering is a faithful port of CS2's compositing pipeline — see
 // paintComposite.ts for the shader and its provenance.
-import { API_ORIGIN, getAssetOrigin, withAssetVersion } from "./api";
+import { API_ORIGIN, getAssetOrigin, getBakeEnvironment, withAssetVersion } from "./api";
 import { buildArms, buildTwistSolver, weaponSeat, type ArmsRig, type Hand, type TwistSolver } from "./viewerArms";
 import { buildPropClip, buildViewmodelClip, loadViewmodelClip, viewmodelAssetUrl, type ClipAction, type ClipCue } from "./viewmodelClip";
 import { buildMuzzleFlash, type MuzzleFlash } from "./muzzleFlash";
 import { CHOICES, FLAGS, NUMBERS, choicesVersion, choiceValue, flagValue, flagsVersion, numberValue, numbersVersion, setChoice, setFlag, setNumber } from "./devFlags";
-import { BAKE_ENVIRONMENT, viewerEnvironment } from "./viewerEnvironments";
+import { BAKE_ENVIRONMENT, viewerEnvironment, type ViewerEnvironment } from "./viewerEnvironments";
 import { compositePaint, dropCompositeCache, loadPaintDef, loadWeaponInputs, paintTextureUrl } from "./paintComposite";
 import { type CharmShading, dressCharm, loadCharmTintMasks, tuneCharmShading } from "./charmMaterial";
 import { tickCharmLiquid } from "./charmLiquid";
@@ -40,9 +40,9 @@ import {
   wakeCharmSim,
   worldToCharmDir,
 } from "./charmPhysics";
-import { applyStickerSfx, type StickerSfx } from "./stickerShader";
-import { compositeGlove, loadGlovePaintDef } from "./gloveComposite";
-import { compositeGloveModern, loadGloveModernDef } from "./gloveCompositeModern";
+import { applyStickerMask, applyStickerSfx, type StickerHoloLive, type StickerSfx } from "./stickerShader";
+import { compositeGlove, gloveLegacySeedMoves, loadGlovePaintDef } from "./gloveComposite";
+import { compositeGloveModern, gloveSeedMoves, loadGloveModernDef } from "./gloveCompositeModern";
 import { isQuadModel } from "./viewerModel";
 import { hasModel, modelUrlFor } from "./modelAvailability";
 import { INCOMPLETE } from "./viewerSentinel";
@@ -61,7 +61,11 @@ import NAMETAG_ANCHORS from "./nametagAnchors.json";
 // Same shared-prop tree the StatTrak module comes from — see MODULE_GLB.
 const NAMETAG_GLB = "extra/nametag_module";
 import {
+  alphaAsMask,
+  ATLAS_ROWS,
   composeDigitAtlas,
+  digitBand,
+  engravingMask,
   isDisplayMaterial,
   MODULE_GLB,
   MODULE_GLB_KNIFE,
@@ -257,8 +261,126 @@ export { hasModel, hasModelSync, modelUrlFor } from "./modelAvailability";
 interface SharedGL {
   renderer: import("three").WebGLRenderer;
   env: import("three").Texture;
+  /** The daylight rig's sky and backdrop — built on first use, see getDaylight. */
+  daylight?: { env: import("three").Texture; plate: import("three").Texture };
+  /** Reflections built from a backdrop photograph, by its URL — see getBackdropEnv. */
+  backdropEnvs?: Map<string, import("three").Texture>;
 }
 let sharedGL: SharedGL | null = null;
+/** The calibrated tone-mapping exposure — see getSharedGL. */
+const BASE_EXPOSURE = 0.75;
+
+/**
+ * The DAYLIGHT rig's sky (to light by) and haze (to stand behind), generated.
+ *
+ * CS2 inspects an item in front of the main menu's map scene: an overcast sky,
+ * a bright pale horizon and warm ground. Measured off in-game screenshots the
+ * backdrop sits around rgb(127-149, 135-156, 139-159) — a desaturated blue-grey —
+ * and the light it gives is NEUTRAL: Blackbook's white print reads (221,217,208).
+ * Nothing shipped matches that (venice_sunset is a warm sunset; RoomEnvironment
+ * is a flat box with nothing for metal to mirror), and the game's own vanity
+ * panoramas are not on every mount, so both are painted here: a vertical
+ * gradient with a soft bright patch where an overcast sun would be, prefiltered
+ * once per context like the HDRI.
+ */
+function getDaylight(THREE: ThreeBundle["THREE"], renderer: import("three").WebGLRenderer) {
+  const gl = sharedGL;
+  if (gl?.daylight && gl.renderer === renderer) return gl.daylight;
+  const paint = (w: number, h: number, stops: [number, string][], glow?: { x: number; y: number; r: number; a: number }) => {
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext("2d")!;
+    const g = ctx.createLinearGradient(0, 0, 0, h);
+    for (const [at, col] of stops) g.addColorStop(at, col);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, w, h);
+    if (glow) {
+      const rg = ctx.createRadialGradient(glow.x * w, glow.y * h, 0, glow.x * w, glow.y * h, glow.r * w);
+      rg.addColorStop(0, `rgba(255,255,250,${glow.a})`);
+      rg.addColorStop(1, "rgba(255,255,250,0)");
+      ctx.fillStyle = rg;
+      ctx.fillRect(0, 0, w, h);
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  // Equirect: top row is the zenith, the middle row the horizon.
+  const sky = paint(
+    512,
+    256,
+    [
+      [0, "#97a8b9"],
+      [0.32, "#bcc7d0"],
+      [0.49, "#e6e8e7"],
+      [0.52, "#b3ada2"],
+      [1, "#6a655d"],
+    ],
+    { x: 0.62, y: 0.3, r: 0.16, a: 0.85 },
+  );
+  sky.mapping = THREE.EquirectangularReflectionMapping;
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const env = pmrem.fromEquirectangular(sky).texture;
+  pmrem.dispose();
+  sky.dispose();
+  // The haze behind the item: what the menu scene reads as once it is out of
+  // focus — sky at the top, the bright horizon a little above centre, warm
+  // ground below.
+  // Authored ~12% under the target: it is drawn through the daylight rig's
+  // 1.25 exposure, and measured on screen it then lands on the game's haze.
+  const plate = paint(1024, 576, [
+    [0, "#70797f"],
+    [0.42, "#959ca0"],
+    [0.6, "#929390"],
+    [1, "#6f6b64"],
+  ]);
+  const daylight = { env, plate };
+  if (gl && gl.renderer === renderer) gl.daylight = daylight;
+  return daylight;
+}
+
+/**
+ * Reflections from a backdrop PHOTOGRAPH, so a scene lights what stands in it.
+ *
+ * A screenshot is a ~90 degree window, not a panorama, so it is unwrapped the
+ * cheap way: stretched over the sphere top to bottom (its sky overhead, its
+ * ground underfoot) and laid twice around it, the second copy mirrored so the
+ * seam meets itself. Prefiltered, that reads as "this place": its colour, its
+ * bright side, its dark ground. Glossy metal mirrors a smeared copy of the
+ * scene rather than the true room behind the camera — which nothing short of a
+ * real panorama could give, and a blurred backdrop never contradicts.
+ */
+function getBackdropEnv(
+  THREE: ThreeBundle["THREE"],
+  renderer: import("three").WebGLRenderer,
+  url: string,
+  plate: import("three").Texture,
+): import("three").Texture {
+  const gl = sharedGL;
+  const cached = gl?.renderer === renderer ? gl.backdropEnvs?.get(url) : undefined;
+  if (cached) return cached;
+  const img = plate.image as CanvasImageSource;
+  const c = document.createElement("canvas");
+  c.width = 1024;
+  c.height = 512;
+  const ctx = c.getContext("2d")!;
+  ctx.drawImage(img, 0, 0, 512, 512);
+  ctx.save();
+  ctx.translate(1024, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(img, 0, 0, 512, 512);
+  ctx.restore();
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const env = pmrem.fromEquirectangular(tex).texture;
+  pmrem.dispose();
+  tex.dispose();
+  if (gl && gl.renderer === renderer) (gl.backdropEnvs ??= new Map()).set(url, env);
+  return env;
+}
 function loadSceneEnvironment(
   THREE: ThreeBundle["THREE"],
   renderer: import("three").WebGLRenderer,
@@ -299,7 +421,9 @@ function loadPlate(THREE: ThreeBundle["THREE"], url: string): Promise<import("th
   if (hit) return hit;
   const p = new Promise<import("three").Texture | null>((resolve) => {
     new THREE.TextureLoader().load(
-      withAssetVersion(`${getAssetOrigin()}${url}`),
+      // An absolute URL is a backdrop shipped with the bundle (see
+      // ViewerEnvironment.backdrop), not a file on the models mount.
+      /^https?:\/\//.test(url) ? url : withAssetVersion(`${getAssetOrigin()}${url}`),
       (tex) => {
         tex.colorSpace = THREE.SRGBColorSpace;
         // The backdrop asks for a blurred mip level rather than shipping a
@@ -343,8 +467,9 @@ function getSharedGL(
   // 0.75 is csgoskins' default (`env.toneMappingExposure || 0.75`); their
   // per-scenery overrides run 0.65-1.2. It matters more than it looks with bloom
   // on: the bright-pass threshold is absolute, so exposure decides how much of
-  // the frame is "bright".
-  renderer.toneMappingExposure = 0.75;
+  // the frame is "bright". A rig may override it — drawFrame applies each
+  // viewer's own before every frame (ViewerEnvironment.exposure).
+  renderer.toneMappingExposure = BASE_EXPOSURE;
   // Image-based studio lighting carries the shading (composited metal/rough
   // maps need real reflections); directionals only shape highlights.
   const pmrem = new THREE.PMREMGenerator(renderer);
@@ -1200,6 +1325,10 @@ function loadStickerTexture(url: string) {
         // Rides the texture so the stickerReady sync path (a drag rebuild
         // never re-awaits the loader) keeps the expansion flag with the map.
         tex.userData.stkRealStickerArt = realStickerArt;
+        // The crop, as a fraction of the source: left, top, width, height. The
+        // effect textures are the game's uncropped files, and the sticker
+        // shader walks the map's UV back through this to read them (STK_UV).
+        tex.userData.stkArtUv = [sx / img.width, sy / img.height, side / img.width, side / img.height];
         return { tex, aspect: w / h, realStickerArt };
       } catch {
         return null;
@@ -1283,6 +1412,11 @@ interface PoseBones {
    *  poseXform: the bone's live matrixWorld carries the glb node transform
    *  while its bind inverse does not. */
   byName: Map<string, import("three").Matrix4>;
+  /** Each bone's own BIND frame in model inches (the inverse of its bind
+   *  inverse). An attachment is authored in its parent bone's axes, so a bone
+   *  that is turned at bind turns the attachment with it — see
+   *  placeAttachedModule. */
+  bind: Map<string, import("three").Matrix4>;
   /** Rotation of the exporter's model→world node matrix (the axis swizzle).
    *  Dividing it out of a bone's pose leaves the rotation the CLIP applied,
    *  which is what an attachment has to share. It measures 0.05-0.09 degrees
@@ -1290,6 +1424,47 @@ interface PoseBones {
   modelQuat: import("three").Quaternion | null;
 }
 const posedCache = new Map<string, PosedModel>();
+
+/** How much the knife's digit row is enlarged before it is drawn — see
+ *  digitBand. 4x turns the 512px atlas's row into a 2048 x 256 strip. */
+const KNIFE_DIGIT_SCALE = 4;
+/** The knife digit colour atlas exactly as the game ships it — published only
+ *  when its alpha actually cuts the scratches out, which is all it is used for. */
+interface KnifeDigitArt {
+  color: HTMLImageElement;
+}
+let knifeDigitArt: Promise<KnifeDigitArt | null> | null = null;
+/**
+ * The knife's digit atlas from the stattrak-art extraction step: the game's
+ * colour atlas WITH its alpha (the scratch cut-out the glTF copy drops). Null
+ * on a mount extracted before that step — the caller then rebuilds the cut
+ * from the normals.
+ * Fetched once per page.
+ */
+function loadKnifeDigitArt(): Promise<KnifeDigitArt | null> {
+  knifeDigitArt ??= (async () => {
+    try {
+      const res = await fetch(withAssetVersion(`${getAssetOrigin()}/models/stattrak-art.json`));
+      if (!res.ok) return null;
+      // The normal atlas the step also writes is NOT used: its RGB is the
+      // module glTF's own, and its alpha is 0 throughout, which a canvas would
+      // turn into black.
+      const file = ((await res.json()) as { knife?: { color?: unknown } })?.knife?.color;
+      if (typeof file !== "string") return null;
+      const color = await new Promise<HTMLImageElement | null>((resolve) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => resolve(img);
+        img.onerror = () => resolve(null);
+        img.src = withAssetVersion(`${getAssetOrigin()}/models/${file.split("/").map(encodeURIComponent).join("/")}`);
+      });
+      return color ? { color } : null;
+    } catch {
+      return null;
+    }
+  })();
+  return knifeDigitArt;
+}
 // Matches GLTF_CACHE_MAX — there is no point holding posed geometry for a model
 // whose source has already been evicted. ~1MB an entry.
 const POSED_CACHE_MAX = 12;
@@ -1520,7 +1695,7 @@ function bakePose(
   // Per-bone transforms, for attachments — see PoseBones. Read from the first
   // skinned mesh and NOT cached: it is 16 matrix multiplies on the largest rig,
   // against the per-vertex blend below that the cache actually exists for.
-  const bones: PoseBones = { byName: new Map(), modelQuat: null };
+  const bones: PoseBones = { byName: new Map(), bind: new Map(), modelQuat: null };
   {
     const sm = skinned[0];
     if (sm) {
@@ -1533,6 +1708,7 @@ function bakePose(
             .multiply(sm.bindMatrix)
             .premultiply(sm.bindMatrixInverse),
         );
+        bones.bind.set(bone.name, sm.skeleton.boneInverses[bi].clone().invert());
       });
       // Walk out of the bone chain to the node the exporter parked the swizzle
       // (and the inch->metre scale) on. decompose, not setFromRotationMatrix:
@@ -1788,7 +1964,13 @@ const wrapRotation = (deg: number) => ((((deg + 180) % 360) + 360) % 360) - 180;
 // ~3.2-3.5; only near-horizontal poses (the Nova) land way above. Padding those
 // back down to the cluster keeps every gun at the same on-screen scale.
 const MAX_CROP_ASPECT = 3.6;
-async function cropToContent(blob: Blob, margin = 0.03): Promise<Blob | null> {
+async function cropToContent(
+  blob: Blob,
+  margin = 0.03,
+  /** Filled with how many visible pixels there are and how many of them are
+   *  lit at all — see BLANK_BAKE_LIT. */
+  stats?: { visible: number; lit: number },
+): Promise<Blob | null> {
   try {
     const img = await createImageBitmap(blob);
     const cv = document.createElement("canvas");
@@ -1801,15 +1983,24 @@ async function cropToContent(blob: Blob, margin = 0.03): Promise<Blob | null> {
     let minY = cv.height;
     let maxX = -1;
     let maxY = -1;
+    let visible = 0;
+    let lit = 0;
     for (let y = 0; y < cv.height; y++) {
       for (let x = 0; x < cv.width; x++) {
-        if (d[(y * cv.width + x) * 4 + 3] > 8) {
+        const o = (y * cv.width + x) * 4;
+        if (d[o + 3] > 8) {
+          visible++;
+          if (Math.max(d[o], d[o + 1], d[o + 2]) > 24) lit++;
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
           if (y < minY) minY = y;
           if (y > maxY) maxY = y;
         }
       }
+    }
+    if (stats) {
+      stats.visible = visible;
+      stats.lit = lit;
     }
     if (maxX < 0) return blob; // fully transparent — keep as-is
     const mx = Math.round((maxX - minX + 1) * margin);
@@ -2080,6 +2271,10 @@ const PREEMPTED = Symbol("preempted");
  *  whole point of the symbol, and there is only ever the one. */
 export { INCOMPLETE };
 
+/** Below this share of visible pixels lit above near-black, a bake is a failed
+ *  frame, not a dark item. See snapshotModelNow. */
+const BLANK_BAKE_LIT = 0.02;
+
 async function snapshotModelNow(
   model: string,
   opts: Omit<ViewerOpts, "interactive" | "still">,
@@ -2121,8 +2316,25 @@ async function snapshotModelNow(
     // finishing would not fix it. INCOMPLETE (not null) so the caller can leave
     // the item queued and try again later.
     if (handle.paintIncomplete()) return INCOMPLETE;
+    // The paint was asked for and is not on the model — a network blip, a GPU
+    // hiccup. The unpainted model still renders (right for a live view), but a
+    // card made of it is stored for good: a Doppler that came back a plain
+    // Butterfly Knife on every refresh. Fail the bake; the caller retries.
+    if (handle.paintFailed()) return null;
     const raw = await handle.snapshot();
-    return raw ? await cropToContent(raw) : raw;
+    if (!raw) return raw;
+    const stats = { visible: 0, lit: 0 };
+    const out = await cropToContent(raw, undefined, stats);
+    // A black frame, with something in it: the context was lost or the scene
+    // was never lit, and the picture is a silhouette. Measured, a real render
+    // keeps far more than this lit even on the darkest item (a bare glove under
+    // the studio rig: 8% of it; under CS2: all of it) — the black Driver Gloves
+    // card that got stored kept 0.7%. Refused rather than stored for everyone.
+    if (stats.visible && stats.lit / stats.visible < BLANK_BAKE_LIT) {
+      console.warn(`[viewer3d] snapshot of ${model} came out black — not baking it`);
+      return null;
+    }
+    return out;
   } catch (e) {
     // A bake passes no signal of its own, so any abort it sees is a preemption
     // by an interactive mount. Reported as PREEMPTED so the caller retries —
@@ -2365,6 +2577,9 @@ export interface ViewerHandle {
    *  not on the mount yet (an extraction is still running). What's on screen is
    *  not the real skin, so it must not be baked into a card. */
   paintIncomplete: () => boolean;
+  /** True when a paint was asked for and is NOT on the model — it failed to load
+   *  or composite, and the unpainted model is showing. Never bake that. */
+  paintFailed: () => boolean;
   /** Measured placement frame, for tools/shadertest. See the impl for why. */
   probePlacement: () => PlacementProbe;
   /** Where the name plate landed, measured against the weapon. See NameplateProbe. */
@@ -2908,7 +3123,7 @@ export interface FirstPersonSpec {
    * paintable glove is a near-black placeholder meant to be replaced — so a
    * player wearing Sport Gloves would see black hands rather than their gloves.
    */
-  armsPaint?: { material: string; wear?: number | null } | null;
+  armsPaint?: { material: string; wear?: number | null; seed?: number | null } | null;
   /** The equipped AGENT's model, for its first-person sleeve. Absent leaves the
    *  forearms bare, which is right for an agent that has bare arms. */
   sleeve?: string | null;
@@ -3037,6 +3252,9 @@ export interface ViewerOpts {
   /** Per-slot UV anchors from the model. Without them placement falls back to
    *  the old silhouette guess, which does NOT match the game. */
   stickerSlots?: StickerSlot[];
+  /** The weapon's sticker mask per body (bare filenames under /models) — where
+   *  a sticker may SHOW. See applyStickerMask. */
+  stickerMasks?: Partial<Record<"body_hd" | "body_legacy", string>>;
   /** The model's own charm surfaces. Without them a charm is seated on whatever
    *  triangle happens to be nearest, which finds A surface rather than one the
    *  game would hang a charm on. See CharmSurface. */
@@ -3098,6 +3316,10 @@ export interface ViewerOpts {
   /** Orbit the camera by this many radians about Y. tools/shadertest only —
    *  lets a sweep measure the same decal from many angles deterministically. */
   viewAngle?: number;
+  /** Raise the camera by this many radians above its framed elevation, after
+   *  viewAngle. tools/shadertest only — for anything that depends on looking
+   *  down at the item (the charm liquid's back-wall term). */
+  viewElevation?: number;
   /** Force decals to ignore depth. tools/shadertest only: renders the decal's
    *  unoccluded silhouette, which is the upper bound a correct render must
    *  match. Comparing against it turns "is the sticker behind the gun?" into a
@@ -3170,6 +3392,8 @@ async function buildViewer(
   // Set by the paint build below when a texture the skin names wasn't on the
   // mount. Read by callers before they bake a card — see ViewerHandle.
   let paintWasIncomplete = false;
+  /** A paint was asked for and is not on the model — see ViewerHandle. */
+  let paintFailed = false;
   // Which body survived the hd/legacy prune below — slot markup is per-variant.
   let bodyVariant = "body_hd";
   // What the prop cull removed — if this reads 0 tris on the Revolver or
@@ -3183,7 +3407,7 @@ async function buildViewer(
   let poseBoneName: string | null = null;
   // The same motion per BONE, for attachments that hang off something other
   // than the body — see PoseBones.
-  let poseBones: PoseBones = { byName: new Map(), modelQuat: null };
+  let poseBones: PoseBones = { byName: new Map(), bind: new Map(), modelQuat: null };
   // Lay a dual-wield pair out parallel rather than in the icon's tent. Off for
   // card bakes (`still`), which want the game's own item art — see the call to
   // bakePose below. Harmless on a single-weapon rig: bakePose finds no `*_l`
@@ -3308,12 +3532,25 @@ async function buildViewer(
   // five intensities and a rotation, all of them assignable on the lights that
   // are already in the scene, so there was never anything a remount provided
   // except the re-read itself.
-  const rig = viewerEnvironment(opts?.still ? BAKE_ENVIRONMENT : debugChoice("env"));
+  // A bake follows the SERVER's rig when it names one: the cards land in its
+  // store, so it alone decides how they are lit (Catalog.bakeEnvironment).
+  const rig = viewerEnvironment(opts?.still ? (getBakeEnvironment() ?? BAKE_ENVIRONMENT) : debugChoice("env"));
   const L = { ...rig.lighting, ...(opts?.lighting ?? {}) };
   // Which preset those numbers came from, so a live re-light can skip the frames
   // where nothing changed — the poll runs every frame and the answer is the same
   // one all but a handful of times in a session.
   let rigKey = rig.key;
+  // The daylight rig lights by its own painted sky (getDaylight), and sets its
+  // own exposure — read by drawFrame, since the renderer is shared and every
+  // other viewer on the page has a say in it too.
+  if (rig.daylight) scene.environment = getDaylight(THREE, renderer).env;
+  // A photographed scene is AWAITED here, before anything draws: otherwise the
+  // first frames reflect the studio sunset and swap to the scene a beat later,
+  // and a card baked under such a rig could catch the wrong one. One small image
+  // shipped with the bundle, cached after the first viewer.
+  const mountPhoto = rig.backdrop ? await loadPlate(THREE, rig.backdrop.image) : null;
+  if (mountPhoto && rig.backdrop) scene.environment = getBackdropEnv(THREE, renderer, rig.backdrop.image, mountPhoto);
+  let exposureNow = rig.exposure ?? BASE_EXPOSURE;
   scene.environmentIntensity = L.env;
   // Theirs too: the HDRI is a real place, so which way it faces decides where the
   // sun and the bright sky sit in every reflection. 3.8 rad is what csgoskins use.
@@ -3364,6 +3601,13 @@ async function buildViewer(
   const spot = new THREE.SpotLight(0xffb3b3, L.spot, 0, 0.8, 0.3, 0);
   scene.add(spot);
   scene.add(spot.target);
+  /** A rig's lamp colours over the calibrated ones above. */
+  const colourLamps = (r: ViewerEnvironment) => {
+    key.color.setHex(r.colors?.key ?? 0xffccb3);
+    rim.color.setHex(r.colors?.rim ?? 0xdde6ff);
+    spot.color.setHex(r.colors?.spot ?? 0xffb3b3);
+  };
+  colourLamps(rig);
   // Context allocation + the PMREM prefilter of RoomEnvironment. Both are per
   // mount today and neither depends on the item, so this stage is pure overhead.
   mt.mark("ctx");
@@ -3897,12 +4141,16 @@ async function buildViewer(
    * full rebuild — a fresh GLB load, a fresh context and a fresh 2048² composite
    * per pointer move, which is the slideshow the weapon path stopped having.
    *
-   * The SEED is deliberately absent: csgo_customglove never reads it (see the
-   * patternMoves gate in App.vue), so a pattern change on a glove is a no-op
-   * rather than a repaint.
+   * The SEED places the artwork on both generations: the 22 substrate/surface
+   * finishes roll it in their own vcompmat, the other 73 in the shared include
+   * they all pull in (gloveRolls in gloveCompositeModern). A finish whose rolls
+   * are all flat ignores it, so a pattern change there stays a no-op rather
+   * than a repaint — `seeded` says which this is.
    */
   let gloveCtx: {
-    run: (wear: number, size?: number) => Promise<GloveMaps | null>;
+    run: (wear: number, size?: number, seed?: number | null) => Promise<GloveMaps | null>;
+    /** Does a new pattern change the composite? */
+    seeded: boolean;
     /** The materials wearing the composite — the ones to re-point. */
     mats: import("three").MeshStandardMaterial[];
     /** What is on those materials right now, to be freed once replaced. */
@@ -3935,14 +4183,16 @@ async function buildViewer(
       // The re-composite below has to run the same generation this mount
       // resolved to, and re-deciding it per tick would re-fetch both defs and
       // re-run the whole "try 73, fall back to 22" probe on every pointer move.
-      let run: ((wear: number, size?: number) => Promise<GloveMaps | null>) | null = def
-        ? (w, s) => compositeGlove(THREE, renderer, def, { wear: w, size: s })
+      let run: ((wear: number, size?: number, seed?: number | null) => Promise<GloveMaps | null>) | null = def
+        ? (w, s, sd) => compositeGlove(THREE, renderer, def, { wear: w, size: s, seed: sd })
         : null;
-      let right: GloveMaps | null = run ? await run(opts?.wear ?? 0) : null;
+      let seeded = !!def && gloveLegacySeedMoves(def);
+      let right: GloveMaps | null = run ? await run(opts?.wear ?? 0, undefined, opts?.seed ?? null) : null;
       if (!right) {
         const mdef = await loadGloveModernDef(opts.paintMaterial);
-        run = mdef ? (w, s) => compositeGloveModern(THREE, renderer, mdef, { wear: w, size: s }) : null;
-        if (run) right = await run(opts?.wear ?? 0);
+        run = mdef ? (w, s, sd) => compositeGloveModern(THREE, renderer, mdef, { wear: w, size: s, seed: sd }) : null;
+        seeded = !!mdef && gloveSeedMoves(mdef);
+        if (run) right = await run(opts?.wear ?? 0, undefined, opts?.seed ?? null);
       }
       const left = right;
       // A glove composited around a texture that never arrived is not the real
@@ -3979,7 +4229,7 @@ async function buildViewer(
         // Collected AFTER the traverse for the same reason the weapon side's
         // paintedMats is: one list, built once, so a later re-composite has
         // somewhere to point.
-        if (run) gloveCtx = { run, mats: gloveMats, current: first };
+        if (run) gloveCtx = { run, seeded, mats: gloveMats, current: first };
       } else {
         // A paintable glove's BASE mesh is a near-black placeholder meant to be
         // replaced by its finish, so failing to composite does not degrade to
@@ -4143,6 +4393,7 @@ async function buildViewer(
         // Sticky: a rebuild that composites cleanly clears it, but within one
         // build any missing texture means what's on screen isn't the real skin.
         paintWasIncomplete = !!comp?.incomplete;
+        if (!comp) paintFailed = true;
         // Custom paint jobs ship their own normal map (paint-UV space).
         // Gated on paint.useNormalMap, NOT on the texture existing: these
         // materials ship a real g_tNormal even with the switch off, so keying
@@ -4190,6 +4441,8 @@ async function buildViewer(
           // list, built once, so a later re-composite has somewhere to point.
           paintCtx = { paint, weaponInputs, mats: paintedMats };
         }
+      } else {
+        paintFailed = true;
       }
     } catch (e) {
       // A cancellation is not a paint failure. Without this re-throw the
@@ -4202,6 +4455,7 @@ async function buildViewer(
       // symptom of half a dozen unrelated causes and this catch used to name
       // none of them. Warn rather than throw; the viewer is still usable.
       console.warn(`[viewer3d] paint failed for ${model} (${weaponPaint}) — rendering untextured`, e);
+      paintFailed = true;
     }
     mt.mark("mat");
   }
@@ -4314,6 +4568,21 @@ async function buildViewer(
     // exporter oriented, so they want the flat-on CAMERA without any of the
     // knife's bounding-box gymnastics. Nothing to rotate; just pick the vector.
     flatOn = true;
+    // ...EXCEPT a charm whose broad side the exporter left on the other axis.
+    // The weapon-hung charm already turns by the model's own answer (the charm
+    // build: `(size.z > size.x ? PI/2 : 0) + PI`, its thinnest horizontal axis
+    // being its face normal), and is right for every set. This view was right
+    // only for the sets that take PI/2 there; the Dr. Boom grenades (kc_db_*)
+    // take 0, so on their own they were drawn side-on — the "8" of 8 Ball IGL on
+    // the far edge and its grenade lever reading as a black fin over the top.
+    // Same rule, offset so the sets that were right stay exactly as they were.
+    if (kind === "charm") {
+      const size = new THREE.Box3().setFromObject(object).getSize(new THREE.Vector3());
+      if (!(size.z > size.x)) {
+        object.rotateOnWorldAxis(WORLD_Y, -Math.PI / 2);
+        object.updateMatrixWorld(true);
+      }
+    }
   }
 
   // Auto-frame: center the model and pull the camera back to fit.
@@ -4571,6 +4840,11 @@ async function buildViewer(
     const { x, z } = camera.position;
     camera.position.x = x * Math.cos(a) - z * Math.sin(a);
     camera.position.z = x * Math.sin(a) + z * Math.cos(a);
+  }
+  if (opts?.viewElevation) {
+    const sph = new THREE.Spherical().setFromVector3(camera.position);
+    sph.phi = Math.min(Math.PI - 0.01, Math.max(0.01, sph.phi - opts.viewElevation));
+    camera.position.setFromSpherical(sph);
   }
   camera.lookAt(0, 0, 0);
 
@@ -5172,8 +5446,30 @@ async function buildViewer(
    * the weapon between two frames of pointer movement. Without one — a fresh
    * placement, a numeric edit — prefer what the user can actually see.
    */
-  function uv1ToSurface(u: number, v: number, near?: import("three").Vector3 | null): SurfacePoint | null {
+  function uv1ToSurface(
+    u: number,
+    v: number,
+    near?: import("three").Vector3 | null,
+    reach = 0,
+  ): SurfacePoint | null {
     const all = uv1Candidates(u, v);
+    /**
+     * An anchor that falls in a seam of the unwrap is not a sticker with nowhere
+     * to go. The game projects the sticker in UV1 and draws whatever of its
+     * rectangle lands on the body; only this resolve needs a triangle under the
+     * exact centre. On the legacy AK-47 the handguard slot's anchor sits at
+     * u 0.336 against a handguard island that starts at 0.338 — two thousandths
+     * into the sticker_gaps strip — so the fourth sticker silently vanished on
+     * every legacy finish (Redline, Vulcan…). `reach` is how far the sticker's
+     * own footprint extends; look outward within it, nearest ring first.
+     */
+    for (const f of [0.1, 0.25, 0.5, 0.8]) {
+      if (all.length || !reach) break;
+      for (let k = 0; k < 8; k++) {
+        const a = (k * Math.PI) / 4;
+        all.push(...uv1Candidates(u + Math.cos(a) * reach * f, v + Math.sin(a) * reach * f));
+      }
+    }
     if (all.length <= 1) return all[0] ?? null;
     let best: SurfacePoint | null = null;
     let bestScore = Infinity;
@@ -5307,6 +5603,32 @@ async function buildViewer(
     (lo, sm) => (!lo || sm.index < lo.index ? sm : lo),
     undefined,
   );
+  /**
+   * The weapon's sticker mask for the body on screen, loaded once per mount on
+   * the first decal that wants it. Null when the mount has none (before v34),
+   * which draws stickers whole, as before. Flipped like every glTF texture: the
+   * UV1 the decal samples it at comes straight out of the GLB.
+   */
+  let stickerMaskTex: Promise<import("three").Texture | null> | null = null;
+  const stickerMask = () =>
+    (stickerMaskTex ??= (() => {
+      const file = opts?.stickerMasks?.[bodyVariant as "body_hd" | "body_legacy"];
+      if (!file) return Promise.resolve(null);
+      return new THREE.TextureLoader()
+        .loadAsync(withAssetVersion(`${getAssetOrigin()}/models/${encodeURIComponent(file)}`))
+        .then((t) => {
+          t.flipY = false;
+          t.colorSpace = THREE.NoColorSpace;
+          // REPEAT, like every texture the game reads in UV0. The legacy bodies
+          // tile their unwrap well past the unit square — the legacy AK-47
+          // spans u -0.12..2.01 and v -4.0..3.41 on 2,014 of its 12,935
+          // vertices — and a clamped mask read those islands off its border, so
+          // a sticker crossing one was cut along the seam (the Redline AK).
+          t.wrapS = t.wrapT = THREE.RepeatWrapping;
+          return t;
+        })
+        .catch(() => null);
+    })());
   const slotMarkup = (slot: number): { mk: StickerSlot | undefined; shared: boolean } => {
     const exact = anchors.find((sm) => sm.index === slot);
     if (exact) return { mk: exact, shared: false };
@@ -5470,14 +5792,20 @@ async function buildViewer(
     const pos: number[] = [];
     const nor: number[] = [];
     const uvs: number[] = [];
+    // The body's UV0 under each vertex — the space the weapon's sticker mask is
+    // authored in (applyStickerMask). NOT the UV1 this cut is made in: the two
+    // unwraps are unrelated, so it rides along through the clip like position.
+    const body: number[] = [];
     // A clipped vertex carries everything it needs to be interpolated: sticker
-    // coords for the cut, world position and normal for the output.
-    type CutVert = { s: number; t: number; p: import("three").Vector3; n: import("three").Vector3 };
+    // coords for the cut, world position, normal and UV0 for the output.
+    type CutVert = { s: number; t: number; p: import("three").Vector3; n: import("three").Vector3; u0: number; v0: number };
     const lerpVert = (a: CutVert, b: CutVert, f: number): CutVert => ({
       s: a.s + (b.s - a.s) * f,
       t: a.t + (b.t - a.t) * f,
       p: a.p.clone().lerp(b.p, f),
       n: a.n.clone().lerp(b.n, f),
+      u0: a.u0 + (b.u0 - a.u0) * f,
+      v0: a.v0 + (b.v0 - a.v0) * f,
     });
     // Sutherland–Hodgman against the four edges of the unit square.
     const clipEdge = (poly: CutVert[], axis: "s" | "t", keepAbove: boolean, at: number) => {
@@ -5505,6 +5833,8 @@ async function buildViewer(
       const ix = uvIndexFor(mesh);
       if (!ix) continue;
       const { uv, pos: posAttr, nrm, idx } = ix;
+      // -1 marks "no UV0 here", which the mask reads as unmasked.
+      const uv0 = (mesh.geometry as import("three").BufferGeometry).getAttribute("uv");
       // Candidate triangles: every cell the rectangle's UV bbox touches, plus
       // the oversized ones the index keeps aside.
       const seen = new Set<number>();
@@ -5536,6 +5866,8 @@ async function buildViewer(
           n: nrm
             ? new THREE.Vector3().fromBufferAttribute(nrm, i).transformDirection(mesh.matrixWorld)
             : new THREE.Vector3(0, 1, 0),
+          u0: uv0 ? uv0.getX(i) : -1,
+          v0: uv0 ? uv0.getY(i) : -1,
         });
         let poly: CutVert[] = [mk3(ia, va), mk3(ib, vb), mk3(ic, vc)];
         // ONE PATCH, not every preimage. An unwrap maps several separate pieces
@@ -5570,6 +5902,7 @@ async function buildViewer(
             nor.push(tmp.x, tmp.y, tmp.z);
             // The image is authored with V down, as textures are.
             uvs.push(v.s, 1 - v.t);
+            body.push(v.u0, v.v0);
           }
         }
       }
@@ -5579,6 +5912,7 @@ async function buildViewer(
     geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pos), 3));
     geom.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(nor), 3));
     geom.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(uvs), 2));
+    geom.setAttribute("uvBody", new THREE.BufferAttribute(new Float32Array(body), 2));
     return geom;
   }
 
@@ -5959,7 +6293,7 @@ async function buildViewer(
       // facing to report for the grab test — the GEOMETRY is cut in UV below and
       // does not depend on it.
       const near = (liveMesh.get(st.slot)?.userData.stickerCenter as import("three").Vector3 | undefined) ?? null;
-      hit = uv1ToSurface(u, v, near);
+      hit = uv1ToSurface(u, v, near, 0.5 / (mk.scale || 1));
       if (UV_DECAL) uvCut = { u, v, size: 1 / (mk.scale || 1), rot: STICKER_ROT_SIGN * ((st.r ?? 0) * Math.PI) / 180 };
     } else {
       const l = slotBaseL(st.slot) + clamp(st.x ?? 0, bounds.x[0], bounds.x[1]) * OFFSET_SCALE;
@@ -6083,6 +6417,10 @@ async function buildViewer(
       await applyStickerSfx(THREE, mat, (await stickerArtInfo(st.image)).sfx, st.w ?? 0, paintTextureUrl, {
         expandAlpha: tex.userData.stkRealStickerArt === true,
       });
+      // Through the weapon's sticker mask — only on the UV path, the one whose
+      // geometry carries the body UV1 the mask is sampled at.
+      const wepMask = uvCut ? await stickerMask() : null;
+      if (wepMask) applyStickerMask(mat, wepMask);
       mesh = new THREE.Mesh(geom, mat);
       mesh.userData.stickerSlot = st.slot;
       mesh.userData.stickerImage = st.image;
@@ -6096,6 +6434,8 @@ async function buildViewer(
     // across its whole face instead of only near its centre.
     mesh.userData.stickerCenter = hit.point.clone();
     mesh.userData.stickerNormal = hit.normal.clone();
+    // The same centre in offset units — what a drag measures its grab against.
+    mesh.userData.stickerXY = [clamp(usedX ?? 0, bounds.x[0], bounds.x[1]), clamp(usedY ?? 0, bounds.y[0], bounds.y[1])];
     // Half the sticker's world size. On the UV path that is the rectangle's own
     // span measured back into world units, so the grab area still matches what
     // is on screen; decalSizeFor computes exactly that from the uv1 density.
@@ -6139,6 +6479,61 @@ async function buildViewer(
     if (!liveMesh.has(slot)) return;
     flashing.set(slot, performance.now());
   }
+  /**
+   * Holo and lenticular stickers, live: the game's view term, from the camera.
+   *
+   * The game's holo term is dot(V,N) + dot(V,L) (stickerShader's holo branch).
+   * Under our parallel projection V is one constant and there was no light, so
+   * here V comes from a virtual eye HOLO_EYE_DIST model-lengths out, as the
+   * game's inspect camera is close, and L is a light held fixed to the CAMERA,
+   * up and to the left. That is the game's own geometry: its inspect light and
+   * camera stay put while the weapon turns, so turning the weapon changes N and
+   * never L. Here the camera orbits instead, which in view space is the same
+   * thing as long as the light rides with it.
+   *
+   * NOTHING MOVES ON ITS OWN. An earlier pass drifted the light over time and
+   * swung the term up to 6x the game's; against the game that read as a
+   * sticker animating by itself, erratic and far too strong. A lenticular's
+   * frame is a function of the camera angle and nothing else.
+   *
+   * `holoBias` keeps the head-on frame where the game's inspect view shows it
+   * (Econometer's needle on FORCE, see STK_HOLO_LIGHT).
+   */
+  const HOLO_EYE_DIST = 1.5;
+  /** The camera-fixed holo light, view space (x right, y up, z toward the
+   *  viewer): about 37 degrees off the view axis, up and to the left. */
+  const HOLO_LIGHT = new THREE.Vector3(-0.35, 0.5, 0.8).normalize();
+  const holoBias = 0.6 - HOLO_LIGHT.z;
+  /** The faint glint's light, also camera-fixed: near the view axis, so its
+   *  reflection can cross a sticker that faces the viewer. */
+  const HOLO_GLINT = new THREE.Vector3(-0.1, 0.15, 1).normalize();
+  const holoTmp = { eye: new THREE.Vector3() };
+  function stepStickerHolo() {
+    // The decals live in the SCENE, not under `object` (see buildDecal), so
+    // they are found through the slot map rather than a traversal.
+    const lives: StickerHoloLive[] = [];
+    for (const mesh of liveMesh.values()) {
+      const live = (mesh.material as import("three").Material | undefined)?.userData?.stkHolo as
+        | StickerHoloLive
+        | null
+        | undefined;
+      if (live) lives.push(live);
+    }
+    if (!lives.length) return;
+    camera.updateMatrixWorld();
+    const { eye } = holoTmp;
+    eye.copy(controls.target).applyMatrix4(camera.matrixWorldInverse);
+    eye.z += radius * HOLO_EYE_DIST;
+    for (const live of lives) {
+      live.uHoloLive.value = 1;
+      live.uHoloEye.value.copy(eye);
+      live.uHoloLight.value.copy(HOLO_LIGHT);
+      live.uHoloGlint.value.copy(HOLO_GLINT);
+      live.uHoloBias.value = holoBias;
+      live.uHoloShine.value = 1;
+    }
+  }
+
   function stepDecalGlow(now: number) {
     const dt = glowLast ? Math.min((now - glowLast) / 1000, 0.1) : 0;
     glowLast = now;
@@ -6282,25 +6677,25 @@ async function buildViewer(
    * SFX pass, no refcounted store, and an owned render target that has to be
    * disposed rather than released.
    *
-   * The SEED is accepted and ignored. csgo_customglove has no pattern input, so
-   * a seed-only change is genuinely already on screen — and answering `true` is
+   * The SEED repaints only a `seeded` glove (see gloveCtx). On the rest a
+   * seed-only change is genuinely already on screen — and answering `true` is
    * what stops the caller falling back to a rebuild that would produce the exact
    * same pixels.
    */
   async function repaintGloveOnce(wear: number, seed: number, proxy: boolean): Promise<boolean> {
     const ctx = gloveCtx;
     if (!ctx) return false;
-    const wearSame = wear === paintWear;
+    const same = wear === paintWear && (!ctx.seeded || seed === paintSeed);
     paintWear = wear;
     paintSeed = seed;
-    // Nothing to redo when the wear held: the seed moved nothing, and a PROXY
-    // request for a float already on screen at full resolution would only spend
-    // seven passes to make it blurrier. The one same-wear case worth running is
-    // the other direction — the settle back up from a drag's proxy.
-    if (wearSame && (proxy || proxy === paintProxy)) return true;
+    // Nothing to redo when nothing that draws moved, and a PROXY request for a
+    // look already on screen at full resolution would only spend the passes to
+    // make it blurrier. The one same-look case worth running is the other
+    // direction — the settle back up from a drag's proxy.
+    if (same && (proxy || proxy === paintProxy)) return true;
     paintProxy = proxy;
     const seq = ++repaintSeq;
-    const next = await ctx.run(wear, proxy ? PROXY_COMPOSITE_SIZE : undefined).catch(() => null);
+    const next = await ctx.run(wear, proxy ? PROXY_COMPOSITE_SIZE : undefined, seed).catch(() => null);
     if (!next) return false;
     if (disposed || gloveCtx !== ctx || seq !== repaintSeq) {
       next.dispose();
@@ -8930,13 +9325,21 @@ async function buildViewer(
   }
 
   let lqLast = 0;
+  const lqCameraUp = new THREE.Vector3();
   function stepCharmLiquid() {
     const root = kind === "charm" ? object : charm?.sprite;
     if (!root) return;
     const now = performance.now();
     const dt = lqLast ? Math.min(0.1, (now - lqLast) / 1000) : 1 / 60;
     lqLast = now;
-    tickCharmLiquid(THREE, root, WORLD_Y, dt);
+    // An ATTACHED charm hangs along the camera's down (charmGravity: the gun
+    // turns under fixed gravity, as in the game's inspect), so its liquid has
+    // to settle against that same axis. With world +Y here, orbiting the camera
+    // above the gun left the charm hanging down the screen while its liquid
+    // thought it was being looked at from above, and the Butane Buddy flooded
+    // to the brim. A charm shown on its own does not hang, and keeps world up.
+    const up = kind === "charm" ? WORLD_Y : lqCameraUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+    tickCharmLiquid(THREE, root, up, dt);
   }
 
   function updateCharmVisuals() {
@@ -8976,6 +9379,18 @@ async function buildViewer(
   let drag: { type: "sticker"; slot: number } | { type: "charm" } | null = null;
   let rotateAnchorX = 0;
   let rotateStartDeg = 0;
+  /**
+   * Where on the sticker the drag took hold: its centre minus the point under
+   * the pointer, in the slot's offset units. Every move keeps that gap, so a
+   * sticker moves WITH the hand instead of jumping its centre to the cursor —
+   * which made a small nudge impossible, since the first move was a jump of
+   * however far from the centre you had pressed.
+   *
+   * Null until it can be measured: a press that grabbed by proximity rather
+   * than on the surface takes it from the first move instead, and so does the
+   * first move after a rotate, whose pointer has wandered from the press.
+   */
+  let dragGrab: { dx: number; dy: number } | null = null;
   /**
    * The pointer that OWNS the current drag.
    *
@@ -9162,6 +9577,14 @@ async function buildViewer(
       rotateAnchorX = e.clientX;
       const cur = decals.get(drag.slot);
       rotateStartDeg = cur ? (JSON.parse(cur.key) as [string, number | null, number | null, number | null])[3] ?? 0 : 0;
+      // Where on it the press landed — see dragGrab. The pick is by screen
+      // distance, so the ray is re-armed and asked for the surface itself.
+      dragGrab = null;
+      const { mk } = slotMarkup(slot);
+      raycaster.far = Infinity;
+      raycaster.setFromCamera(pointerNdc, camera);
+      const pressHit = raycaster.intersectObjects(mk && uv1Meshes.length ? uv1Meshes : weaponMeshes, false)[0];
+      if (pressHit) takeStickerGrab(slot, pressHit);
       controls.enabled = false;
       el.setPointerCapture(e.pointerId);
     }
@@ -9281,6 +9704,29 @@ async function buildViewer(
     return best;
   }
 
+  /**
+   * The slot's offsets for a surface point, before any clamp — the same two
+   * spaces applyDrag places in (UV1 with markup, body fraction without). Null
+   * when the hit carries no UV1 to read.
+   */
+  function rawStickerOffsets(slot: number, hit: import("three").Intersection) {
+    const { mk } = slotMarkup(slot);
+    if (mk) {
+      const uv = surfaceUv1(hit);
+      return uv ? { x: uv.u - 0.5 - mk.offset[0], y: uv.v - 0.5 - mk.offset[1] } : null;
+    }
+    return {
+      x: (hit.point.getComponent(AXIS_L) - slotBaseL(slot)) / OFFSET_SCALE,
+      y: (hit.point.getComponent(AXIS_H) - baseH) / OFFSET_SCALE,
+    };
+  }
+  /** Measure dragGrab for a slot from a hit under the pointer. */
+  function takeStickerGrab(slot: number, hit: import("three").Intersection) {
+    const at = liveMesh.get(slot)?.userData.stickerXY as [number, number] | undefined;
+    const raw = rawStickerOffsets(slot, hit);
+    dragGrab = at && raw ? { dx: at[0] - raw.x, dy: at[1] - raw.y } : null;
+  }
+
   function applyDrag(e: PointerEvent) {
     if (!drag) return;
     updatePointer(e);
@@ -9300,6 +9746,7 @@ async function buildViewer(
       // for the length of a drag (`controls.enabled = false`), so the gesture
       // costs nothing that was reachable.
       if (entryNow && (twisting || touchPoints.size >= 2)) {
+        dragGrab = null;
         const angle = twoFingerAngle();
         // Latched, but the pair is broken: HOLD, and forget the reference angle
         // so the next frame with two fingers re-seats instead of applying the
@@ -9334,6 +9781,7 @@ async function buildViewer(
         return;
       }
       if (e.shiftKey && entryNow) {
+        dragGrab = null;
         // ROTATE: horizontal sweep -> degrees. Half a degree per pixel is fine
         // for the eye and lands on the 0.5 steps the game quantizes to anyway.
         //
@@ -9379,6 +9827,14 @@ async function buildViewer(
         if (STICKER_LOG) stickerCost.noHit++;
         return;
       }
+      // No grab yet: take it from here and hold still this frame, so the first
+      // move after a proximity grab or a rotate is the zero it should be.
+      if (!dragGrab) {
+        takeStickerGrab(drag.slot, hit);
+        if (dragGrab) return;
+      }
+      const gdx = dragGrab?.dx ?? 0;
+      const gdy = dragGrab?.dy ?? 0;
       // Report the drag in the game's space: read the surface UV1 under the
       // pointer and subtract the slot's own anchor. The old version measured
       // against an invented base along the body, so the numbers we stored
@@ -9395,8 +9851,8 @@ async function buildViewer(
         // Sliding to the nearest point in the region keeps the drag smooth: past
         // the edge the sticker tracks along the boundary instead of freezing,
         // and it picks the pointer straight back up on the way in.
-        let pu = uv.u - 0.5;
-        let pv = uv.v - 0.5;
+        let pu = uv.u - 0.5 + gdx;
+        let pv = uv.v - 0.5 + gdy;
         if (mk.region) {
           const [cu, cvv] = clampToRegion(mk.region, pu, pv);
           if (STICKER_LOG && (cu !== pu || cvv !== pv)) stickerCost.offRegion++;
@@ -9421,8 +9877,8 @@ async function buildViewer(
         }
         return;
       } else {
-        gx = round(clamp((hit.point.getComponent(AXIS_L) - slotBaseL(drag.slot)) / OFFSET_SCALE, bounds.x[0], bounds.x[1]), 3);
-        gy = round(clamp((hit.point.getComponent(AXIS_H) - baseH) / OFFSET_SCALE, bounds.y[0], bounds.y[1]), 3);
+        gx = round(clamp((hit.point.getComponent(AXIS_L) - slotBaseL(drag.slot)) / OFFSET_SCALE + gdx, bounds.x[0], bounds.x[1]), 3);
+        gy = round(clamp((hit.point.getComponent(AXIS_H) - baseH) / OFFSET_SCALE + gdy, bounds.y[0], bounds.y[1]), 3);
       }
       const entry = decals.get(drag.slot);
       if (entry) {
@@ -9956,8 +10412,27 @@ async function buildViewer(
     // comes out centred with center ~= 0). The pose makes the same trip:
     // bind MODEL INCHES -> baked WORLD metres. No `center` correction —
     // object.position applies -center to geometry and module alike.
+    // A bone turned AT BIND turns its attachments with it. `src` adds the
+    // bone's position to the attachment's relative origin but not its rotation,
+    // which is exact for every gun (their bones sit unrotated) and wrong for
+    // the Shadow Daggers, whose `weapon_r` stands at 90 degrees: unrotated, the
+    // plate lands an inch out from the handle instead of an inch up the blade.
+    const bind = bone ? poseBones.bind.get(bone) : undefined;
+    let bindTurn: import("three").Quaternion | null = null;
+    let at = new THREE.Vector3(src[0], src[1], src[2]);
+    if (bind) {
+      const bp = new THREE.Vector3();
+      const bq = new THREE.Quaternion();
+      bind.decompose(bp, bq, new THREE.Vector3());
+      if (Math.abs(bq.w) < 0.9999) {
+        at = at.sub(bp).applyQuaternion(bq).add(bp);
+        // In the module's glb basis, like the attachment's own angles below.
+        const m = poseBones.modelQuat;
+        bindTurn = m ? m.clone().multiply(bq).multiply(m.clone().invert()) : bq;
+      }
+    }
     if (bonePose) {
-      mod.position.set(src[0], src[1], src[2]).applyMatrix4(bonePose);
+      mod.position.copy(at).applyMatrix4(bonePose);
     } else {
       mod.position.set(pos[0], pos[1], pos[2]);
     }
@@ -9978,12 +10453,13 @@ async function buildViewer(
     //
     // Onto that goes the attachment's own tilt, swizzled to match the position
     // (glb x,y,z = model y,z,x). Every GUN anchor is unrotated, so that half is
-    // unconstrained by guns — which is exactly why knives (karambit
-    // [-54.1, 0, -170.4]) do not work yet and stay gated above.
+    // unconstrained by guns; knives (karambit [-54.1, 0, -170.4]) are what
+    // settled it, and they take `sourceAngles`.
     const clipQuat = clipRotation(THREE, bonePose, poseBones.modelQuat) ?? new THREE.Quaternion();
     if (noRotation) mod.quaternion.identity();
     else mod.quaternion
       .copy(clipQuat)
+      .multiply(bindTurn ?? new THREE.Quaternion())
       .multiply(
         new THREE.Quaternion().setFromEuler(
           sourceAngles
@@ -10221,30 +10697,206 @@ async function buildViewer(
     return { glass, worst, at, pushed: push, skipped: want > MAX_PUSH };
   }
 
+  /**
+   * Lay a knife's engraved plate flush on the blade.
+   *
+   * Placed from the attachment alone, the plate lands within a couple of
+   * millimetres of the steel but rarely ON it — measured across the 22 knives,
+   * the Butterfly's floats 1.8mm off its blade and the M9's 1.2mm (a visible
+   * gap edge-on), while the Falchion's sits 2.1mm INSIDE its blade and the
+   * Widowmaker's 1.7mm, which hides most of the count. The game draws the same
+   * quad with a depth bias and gets away with it; a scratch has no thickness to
+   * spare here, so the plate is moved along its own normal until its outermost
+   * sample sits CLEAR above the surface.
+   *
+   * Sampled across the plate rather than at its centre, because a blade is not
+   * flat. A sample further than KNIFE_MAX_LIFT from the plate is not the blade
+   * under it but something it overlaps or overhangs (the Stiletto's bolster,
+   * 7.6mm proud) and is left out, so it can neither lift the whole plate off
+   * the steel nor drag it down to it.
+   *
+   * Returns how far the plate moved.
+   */
+  function seatKnifePlate(mod: import("three").Object3D) {
+    let plate: import("three").Mesh | null = null;
+    mod.traverse((c) => {
+      const m = c as import("three").Mesh;
+      if (m.isMesh && isDisplayMaterial((m.material as import("three").Material | undefined)?.name)) plate = m;
+    });
+    const mesh = plate as import("three").Mesh | null;
+    if (!mesh) return 0;
+    const geo = mesh.geometry;
+    geo.computeBoundingBox();
+    const bb = geo.boundingBox!;
+    const size = bb.getSize(new THREE.Vector3()).toArray();
+    const thin = size.indexOf(Math.min(...size));
+    const long = size.indexOf(Math.max(...size));
+    const across = 3 - thin - long;
+    // Facing from the plate's own normals: the thin axis says which line the
+    // normal lies on, not which way the readout faces.
+    const nAttr = geo.getAttribute("normal");
+    const facing = new THREE.Vector3();
+    for (let i = 0; nAttr && i < nAttr.count; i++) facing.add(new THREE.Vector3().fromBufferAttribute(nAttr, i));
+    if (facing.lengthSq() < 1e-12) facing.setComponent(thin, 1);
+    const n = facing.transformDirection(mesh.matrixWorld);
+    const ctr = bb.getCenter(new THREE.Vector3());
+    const PROBE = 0.01;
+    const KNIFE_MAX_LIFT = 0.003;
+    const CLEAR = 0.0001;
+    let worst = -Infinity;
+    // Centre plus four corners inset from the rim — a sample on the very edge
+    // can slide off the blade onto whatever is behind it.
+    for (const [fl, fa] of [[0, 0], [-0.7, -0.6], [0.7, -0.6], [-0.7, 0.6], [0.7, 0.6]]) {
+      const p = ctr.clone();
+      p.setComponent(long, p.getComponent(long) + (fl * size[long]) / 2);
+      p.setComponent(across, p.getComponent(across) + (fa * size[across]) / 2);
+      p.applyMatrix4(mesh.matrixWorld).addScaledVector(n, PROBE);
+      raycaster.set(p, n.clone().negate());
+      raycaster.far = PROBE * 2;
+      const hit = raycaster.intersectObjects(weaponMeshes, false)[0];
+      if (!hit) continue;
+      const buried = PROBE - hit.distance;
+      if (Math.abs(buried) <= KNIFE_MAX_LIFT) worst = Math.max(worst, buried);
+    }
+    if (worst === -Infinity) return 0;
+    const lift = worst + CLEAR;
+    const at = mod.getWorldPosition(new THREE.Vector3()).addScaledVector(n, lift);
+    mod.position.copy(object.worldToLocal(at));
+    return lift;
+  }
+
+  /**
+   * The knife plate's maps: the count's digits, scratched.
+   *
+   * Three things differ from the gun's lit readout. The digits are carried by
+   * the NORMAL map (the colour atlas is flat grey steel). Only the scratches
+   * draw — csgo_weapon alpha-tests the colour atlas's alpha at 0.667, and the
+   * loader carries that test over from the glTF's MASK mode. And the strokes
+   * are a few texels wide, so everything is built on an enlarged copy of the
+   * one atlas row the plate reads (see digitBand) and the test's edge is
+   * anti-aliased by coverage — the game's own g_flAntiAliasedEdgeStrength — so
+   * the numerals keep a clean outline however close the camera gets.
+   *
+   * The alpha comes from the game's own colour atlas when the mount carries it
+   * (the stattrak-art step); the glTF's copy has none, and an older mount falls
+   * back to rebuilding the cut from the normals (engravingMask).
+   */
+  function dressKnifeDigits(
+    display: import("three").MeshStandardMaterial,
+    count: number | null,
+    art: KnifeDigitArt | null,
+  ) {
+    type Img = CanvasImageSource & { width: number; height: number };
+    const like = (t: import("three").Texture | null, img: HTMLCanvasElement, colorSpace: string) => {
+      const tex = new THREE.CanvasTexture(img);
+      tex.flipY = t?.flipY ?? false;
+      tex.colorSpace = colorSpace as import("three").ColorSpace;
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      // Row 0 of the atlas is the whole band: scale v by the row count so the
+      // plate's own UVs land on it unchanged.
+      const rep = t?.repeat ?? new THREE.Vector2(1, 1);
+      const off = t?.offset ?? new THREE.Vector2(0, 0);
+      tex.repeat.set(rep.x, rep.y * ATLAS_ROWS);
+      tex.offset.set(off.x, off.y * ATLAS_ROWS);
+      stattrakDisposables.push(tex);
+      return tex;
+    };
+    // Colour and relief from the module's own (opaque) atlases; only the CUT
+    // comes from the game's file — see alphaAsMask.
+    const colorImg = display.map?.image as Img | undefined;
+    const normalImg = display.normalMap?.image as Img | undefined;
+    if (!normalImg?.width) return;
+    const srcNormal = display.normalMap;
+    const normals = digitBand(composeDigitAtlas(normalImg, count), KNIFE_DIGIT_SCALE);
+    const normalMap = like(srcNormal, normals, THREE.NoColorSpace);
+    if (colorImg?.width) {
+      display.map = like(display.map, digitBand(composeDigitAtlas(colorImg, count), KNIFE_DIGIT_SCALE), THREE.SRGBColorSpace);
+    }
+    display.normalMap = normalMap;
+    const cut = art?.color
+      ? digitBand(composeDigitAtlas(alphaAsMask(art.color), count), KNIFE_DIGIT_SCALE)
+      : engravingMask(normals);
+    display.alphaMap = like(srcNormal, cut, THREE.NoColorSpace);
+    if (!display.alphaTest) display.alphaTest = 0.667;
+    display.alphaToCoverage = true;
+    display.needsUpdate = true;
+  }
+
+  /**
+   * Rest a name plate's BACK face on the surface under it — the seating for a
+   * plate placed by its attachment's own angles (C4, knives).
+   *
+   * The plate's geometry is centred on its origin when it is mounted (see
+   * mountNameTag), so hung straight on the attachment half its thickness is in
+   * the body. On the C4 that put the label under the screen bezel, and the
+   * stickers on the bezel drew over it — in game the label is a model on top
+   * of stickers that are painted into the surface. The gun path seats along
+   * the receiver's side axis, which is not these plates' normal.
+   *
+   * "Out" is the module's own +Y (source left): the side an unrotated gun's
+   * plate faces, which the attachment's angles carry to the C4's screen and
+   * each knife's handle. Sampled across the back face; a sample further than
+   * PLATE_MAX_MOVE away is something the plate overhangs, not what it rests
+   * on. CLEAR is twice a sticker decal's lift, so the plate always sits above
+   * the stickers around it.
+   */
+  function seatPlateOnSurface(mod: import("three").Object3D) {
+    let found: import("three").Mesh | null = null;
+    mod.traverse((c) => {
+      if (!found && (c as import("three").Mesh).isMesh) found = c as import("three").Mesh;
+    });
+    const mesh = found as import("three").Mesh | null;
+    if (!mesh) return 0;
+    object.updateMatrixWorld(true);
+    mesh.geometry.computeBoundingBox();
+    const bb = mesh.geometry.boundingBox!;
+    const ctr = bb.getCenter(new THREE.Vector3());
+    const half = new THREE.Vector3().subVectors(bb.max, ctr);
+    const toWorld = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z).applyMatrix4(mesh.matrixWorld);
+    const c0 = toWorld(ctr.x, ctr.y, ctr.z);
+    const back = toWorld(ctr.x, ctr.y - half.y, ctr.z);
+    const n = c0.clone().sub(back);
+    const halfThick = n.length();
+    if (halfThick < 1e-9) return 0;
+    n.normalize();
+    const PROBE = 0.01;
+    const PLATE_MAX_MOVE = 0.004;
+    const CLEAR = sizeL * DECAL_LIFT * 2;
+    let worst = -Infinity;
+    for (const [fx, fz] of [[0, 0], [-0.8, -0.6], [0.8, -0.6], [-0.8, 0.6], [0.8, 0.6], [-0.4, 0], [0.4, 0]]) {
+      const p = toWorld(ctr.x + fx * half.x, ctr.y - half.y, ctr.z + fz * half.z).addScaledVector(n, PROBE);
+      raycaster.set(p, n.clone().negate());
+      raycaster.far = PROBE * 2;
+      const hit = raycaster.intersectObjects(weaponMeshes, false)[0];
+      raycaster.far = Infinity;
+      if (!hit) continue;
+      const above = PROBE - hit.distance; // surface height over the back face
+      if (Math.abs(above) <= PLATE_MAX_MOVE) worst = Math.max(worst, above);
+    }
+    if (worst === -Infinity) return 0;
+    const move = worst + CLEAR;
+    const at = mod.getWorldPosition(new THREE.Vector3()).addScaledVector(n, move);
+    mod.position.copy(object.worldToLocal(at));
+    mod.updateMatrixWorld(true);
+    return move;
+  }
+
   const stattrakDisposables: { dispose: () => void }[] = [];
   let stattrakMod: import("three").Object3D | null = null;
   async function mountStatTrak(spec: { count: number | null }) {
     const picked = pickAnchor(STATTRAK_ANCHORS as Record<string, import("./stattrakModule").StatTrakAnchorSet | undefined>, model, !!opts?.legacyPaint);
     if (!picked) return; // no attachment (the C4 has none) — nothing to hang
     const { anchor, knife, bone } = picked;
-    // Knives are SKIPPED — the module is wired for them but its orientation is
-    // unsolved, so enabling it renders a plate stabbed through the blade.
-    //
-    // What already works: the knife asset (stattrak_module_knife) is a flat
-    // engraved plate whose readout is unwrapped with the SAME digit-cell
-    // convention as the gun's (measured: both span u = 1 .. 6.3671875), so the
-    // column permutation carries over untouched. Its digits live in the NORMAL
-    // map (the colour atlas is flat grey) and column 0 is genuinely blank
-    // rather than a dim zero, which digitColumns already handles.
-    //
-    // What does not: the plate ends up perpendicular to the blade. Gun anchors
-    // are all unrotated so they never constrained the Source->three angle
-    // convention; knives rotate hard (karambit [-54.1, 0, -170.4]). A sweep of
-    // 8 axis/order candidates was measured against "plate must be thin along
-    // the knife's thin axis" and NONE produced a coplanar plate (best still
-    // 0.011 thick against a 3.94 x 1.0 x 0cm plate), so the remaining error is
-    // not merely Euler order. See tools/shadertest/stattrak.html.
-    if (knife) return;
+    // A knife's count is a scratch, not a lit display: with no count (the baked
+    // 2D card) there is nothing to draw at all, so the module is not loaded.
+    if (knife && spec.count == null) return;
+    // Knives take their own module (stattrak_module_knife): a bare plate whose
+    // readout is unwrapped with the SAME digit-cell convention as the gun's
+    // (measured: both span u = 1 .. 6.3671875), so the column permutation
+    // carries over untouched. Its digits live in the NORMAL map (the colour
+    // atlas is flat grey) and column 0 is genuinely blank rather than a dim
+    // zero, which digitColumns already handles. How it is placed, cut out and
+    // seated differs — see sourceAngles, engravingMask and seatKnifePlate.
     let modGltf;
     try {
       // The StatTrak module is a single small prop with one texture set — no
@@ -10256,6 +10908,7 @@ async function buildViewer(
     } catch {
       return; // module art missing from the mount: render the weapon regardless
     }
+    const knifeArt = knife ? await loadKnifeDigitArt() : null;
     // clone(true) shares materials with the cached glTF, so the display
     // material MUST be cloned before its maps are swapped or every other
     // viewer's counter changes to this item's.
@@ -10268,6 +10921,10 @@ async function buildViewer(
       const display = mat.clone();
       mesh.material = display;
       stattrakDisposables.push(display);
+      if (knife) {
+        dressKnifeDigits(display, spec.count, knifeArt);
+        return;
+      }
       // No UV surgery. The plate is already unwrapped into ATLAS space — its
       // six digit quads fract to columns 0..5 under Repeat wrapping — so the
       // replacement is an atlas of the same shape with the columns permuted,
@@ -10317,12 +10974,20 @@ async function buildViewer(
     // seating="none" — Valve authors this attachment already seated, with the
     // housing sunk into the receiver and only the readout proud. All this pass
     // has to do afterwards is guarantee the readout actually clears.
-    if (!placeAttachedModule(mod, anchor, bone, false, false, "none")) return;
+    //
+    // Knives compose their angles as a real Source QAngle. Gun anchors are all
+    // unrotated, so they never cared; knife anchors are turned hard (karambit
+    // [-54.1, 0, -170.4]), and under the hand-rolled swizzle every plate stood
+    // perpendicular to its blade. As a QAngle all 22 lie flat on the blade,
+    // front face outward, within 0.2mm of the surface on most.
+    if (!placeAttachedModule(mod, anchor, bone, knife, false, "none")) return;
     object.add(mod);
     stattrakMod = mod;
     object.updateMatrixWorld(true);
-    const clearance = clearReadout(mod);
-    if (clearance?.pushed) object.updateMatrixWorld(true);
+    // The gun pass pushes along the receiver's side axis, which on a knife runs
+    // ALONG the blade — knives seat along the plate's own normal instead.
+    const clearance = knife ? null : clearReadout(mod);
+    if (clearance?.pushed || (knife && seatKnifePlate(mod) !== 0)) object.updateMatrixWorld(true);
     // Placement introspection for tools/shadertest/stattrak.html. Off unless
     // the rig sets the flag, so production pays nothing — and measuring these
     // boxes is what finally settled placement after several wrong theories.
@@ -10540,8 +11205,22 @@ async function buildViewer(
     // instead, so placeAttachedModule only has to supply the POSITION.
     // seating="posed" — the plate, unlike the StatTrak module, is a bare sticker
     // of a thing that has to end up ON the surface, so it does get seated.
-    if (!placeAttachedModule(mod, picked.anchor, picked.bone, false, true, "posed")) return;
+    // The C4 is the exception: its label goes on the LCD's flat front, where
+    // the attachment's own QAngle ([0, 90, 90]: forward along the screen, out
+    // of its face, up its height) lays it exactly as the game does, and the
+    // surface search below lands on the screen bezel's side wall instead and
+    // stands the plate on edge. Valve parents it there unseated, so do we.
+    // The C4 and the knives take the attachment's own angles, composed as a
+    // real Source QAngle — the convention that also lays every knife's StatTrak
+    // plate flat on its blade. The gun path below finds "out" by searching the
+    // surface and reads the reading direction off the angles, which is right
+    // on a rifle and wrong on these: on the C4 the search lands on the screen
+    // bezel's side wall, on the Karambit and Bayonet it laid the plate
+    // diagonally across the handle or stood it on edge.
+    const asAuthored = model === "c4" || picked.knife;
+    if (!placeAttachedModule(mod, picked.anchor, picked.bone, asAuthored, !asAuthored, asAuthored ? "none" : "posed")) return;
     object.add(mod);
+    if (asAuthored) seatPlateOnSurface(mod);
     /**
      * Orient the plate: flatness from the BODY, direction from the GAME DATA.
      *
@@ -10559,7 +11238,7 @@ async function buildViewer(
      */
     const anchorAngles = picked.anchor.angles;
     const normal = surfaceNormalAt(mod.position);
-    if (normal && anchorAngles.length === 3) {
+    if (!asAuthored && normal && anchorAngles.length === 3) {
       const rad = Math.PI / 180;
       // Negated XYZ — settled by sweeping every order/permutation/sign against
       // those two weapons rather than derived from a convention we cannot check.
@@ -10718,13 +11397,13 @@ async function buildViewer(
    * hands is still a weapon being held, whereas a glove that fails to composite
    * is a black blob under a named finish.
    */
-  async function paintGloveOnto(root: import("three").Object3D, material: string, wear: number) {
+  async function paintGloveOnto(root: import("three").Object3D, material: string, wear: number, seed: number | null) {
     try {
       const def = await loadGlovePaintDef(material);
-      let maps: GloveMaps | null = def ? await compositeGlove(THREE, renderer, def, { wear }) : null;
+      let maps: GloveMaps | null = def ? await compositeGlove(THREE, renderer, def, { wear, seed }) : null;
       if (!maps) {
         const mdef = await loadGloveModernDef(material);
-        maps = mdef ? await compositeGloveModern(THREE, renderer, mdef, { wear }) : null;
+        maps = mdef ? await compositeGloveModern(THREE, renderer, mdef, { wear, seed }) : null;
       }
       if (!maps) return;
       const comp = maps;
@@ -10902,7 +11581,9 @@ async function buildViewer(
         // THE HANDS WEAR THE EQUIPPED FINISH. Same compositor the glove item
         // view uses, pointed at the arms instead — a glove is a glove whichever
         // way round it is being looked at.
-        if (spec.armsPaint?.material) await paintGloveOnto(rig.root, spec.armsPaint.material, spec.armsPaint.wear ?? 0);
+        if (spec.armsPaint?.material) {
+          await paintGloveOnto(rig.root, spec.armsPaint.material, spec.armsPaint.wear ?? 0, spec.armsPaint.seed ?? null);
+        }
         arms = rig;
 
         // THE WEAPON'S OWN MOVING PARTS — one clip on each skeleton, played
@@ -11880,7 +12561,7 @@ async function buildViewer(
    */
   let backdrop: import("three").Mesh | null = null;
   const backdropDir = new THREE.Matrix3();
-  function setBackdrop(tex: import("three").Texture | null, isPlate: boolean) {
+  function setBackdrop(tex: import("three").Texture | null, isPlate: boolean, blur?: number) {
     if (!tex) {
       if (backdrop) backdrop.visible = false;
       return;
@@ -11977,7 +12658,7 @@ async function buildViewer(
     if (isPlate && img?.width && img?.height) u.uPlateAspect.value = img.width / img.height;
     // A plate is already a photograph of a room at a distance; the panorama
     // slice is not, and needs more help.
-    u.uBlur.value = isPlate ? 1.1 : 2.6;
+    u.uBlur.value = blur ?? (isPlate ? 1.1 : 2.6);
     backdrop.visible = true;
   }
 
@@ -12007,6 +12688,27 @@ async function buildViewer(
       });
     }
   }
+  // The daylight haze stands behind live viewers only — a card is transparent
+  // over the grid's own background, whatever lit it.
+  if (rig.daylight && !opts?.still) setBackdrop(getDaylight(THREE, renderer).plate, true);
+  /**
+   * A PHOTOGRAPHED scene: fetched (it ships with the bundle, so it is one cached
+   * request), then made both the reflections and — live only — the backdrop.
+   * Re-checked on arrival like the map rigs, so a fast switch away never lands
+   * the old scene on the new preset.
+   */
+  function applyPhotoBackdrop(r: ViewerEnvironment) {
+    const b = r.backdrop;
+    if (!b) return;
+    void loadPlate(THREE, b.image).then((plate) => {
+      if (disposed || rigKey !== r.key || !plate) return;
+      scene.environment = getBackdropEnv(THREE, renderer, b.image, plate);
+      if (!opts?.still) setBackdrop(plate, true, b.blur);
+    });
+  }
+  // The mount already has the photograph (awaited above); only a live viewer
+  // stands it behind the item.
+  if (mountPhoto && rig.backdrop && !opts?.still) setBackdrop(mountPhoto, true, rig.backdrop.blur);
 
   function setEnvironment(name: string) {
     if (opts?.still) return;
@@ -12036,6 +12738,15 @@ async function buildViewer(
           setBackdrop(plate, true);
         });
       }
+    } else if (next.backdrop) {
+      // The studio sky until the photograph lands, then the scene's own.
+      scene.environment = envTex;
+      setBackdrop(null, false);
+      applyPhotoBackdrop(next);
+    } else if (next.daylight) {
+      const day = getDaylight(THREE, renderer);
+      scene.environment = day.env;
+      setBackdrop(day.plate, true);
     } else {
       scene.environment = envTex;
       setBackdrop(null, false);
@@ -12046,6 +12757,8 @@ async function buildViewer(
     key.intensity = lit.key;
     rim.intensity = lit.rim;
     spot.intensity = lit.spot;
+    colourLamps(next);
+    exposureNow = next.exposure ?? BASE_EXPOSURE;
     // BOTH the live rotation and the rest pose the motion restores to. Writing
     // only the first would hold for one frame and then be undone by the next
     // clearInspect, which is the animated viewer quietly reverting to the old
@@ -12659,6 +13372,9 @@ async function buildViewer(
 
   const drawFrame = () => {
     renderer.setSize(cssW, cssH, false);
+    // Per frame, because the renderer is shared: the last viewer to draw would
+    // otherwise decide every other viewer's exposure.
+    renderer.toneMappingExposure = exposureNow;
     // Only the pane's shape. The backdrop's DIRECTION is deliberately fixed —
     // see setBackdrop.
     if (backdrop?.visible) {
@@ -12827,6 +13543,7 @@ async function buildViewer(
     updateRing();
     const tCharm = perfHud ? performance.now() : 0;
     stepDecalGlow(performance.now());
+    stepStickerHolo();
     // Split the first frame's cost in two: `wait` is everything from the last
     // build stage to the draw call (the rAF wait, controls, the charm's first
     // step), `first` is the draw itself — which is where the shader compile and
@@ -13632,6 +14349,7 @@ async function buildViewer(
       };
     },
     paintIncomplete: () => paintWasIncomplete,
+    paintFailed: () => paintFailed,
     // Render one fresh frame and hand back a PNG of exactly what's on screen.
     async snapshot(opts?: { live?: boolean }) {
       if (disposed) return null;

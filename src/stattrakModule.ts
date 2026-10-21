@@ -127,6 +127,112 @@ export function composeDigitAtlas(
   return canvas;
 }
 
+/**
+ * Atlas row 0 — the only row a readout samples — cut out of a composed atlas
+ * and enlarged `scale` times with the browser's high-quality resampling.
+ *
+ * The knife's numerals are scratches a few texels wide: at the shipped 512px a
+ * glyph cell is 32 x 38 texels, which on a 3.9cm plate is 0.2mm a texel, and
+ * an alpha test straight off that grid cuts every stroke into visible stairs.
+ * Enlarging only the row keeps the cost to a 2048 x 256 strip instead of a
+ * 2048-square atlas, and the plate reaches it unchanged through the texture's
+ * repeat: v x ATLAS_ROWS lands row 0 on the whole strip.
+ */
+export function digitBand(atlas: CanvasImageSource & { width: number; height: number }, scale: number): HTMLCanvasElement {
+  const band = document.createElement("canvas");
+  const rowH = atlas.height / ATLAS_ROWS;
+  band.width = Math.round(atlas.width * scale);
+  band.height = Math.round(rowH * scale);
+  const ctx = band.getContext("2d");
+  if (!ctx) return band;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(atlas, 0, 0, atlas.width, rowH, 0, 0, band.width, band.height);
+  return band;
+}
+
+/**
+ * An opaque copy of an image's ALPHA (R = G = B = alpha), for use as an
+ * alphaMap.
+ *
+ * The game's knife colour atlas cuts its scratches with alpha, and handing a
+ * browser that atlas as a colour map loses what is under the cut: a 2D canvas
+ * stores premultiplied, so every texel at alpha 0 comes back black and the
+ * filtered edge of each digit darkens. Its alpha, on the other hand, survives
+ * getImageData exactly — so take only the cut from it and keep the colour (and
+ * the relief) from the module's own opaque copies.
+ */
+export function alphaAsMask(source: CanvasImageSource & { width: number; height: number }): HTMLCanvasElement {
+  const cv = document.createElement("canvas");
+  cv.width = source.width;
+  cv.height = source.height;
+  const ctx = cv.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return cv;
+  ctx.drawImage(source, 0, 0);
+  const img = ctx.getImageData(0, 0, cv.width, cv.height);
+  const px = img.data;
+  for (let i = 0; i < px.length; i += 4) {
+    px[i] = px[i + 1] = px[i + 2] = px[i + 3];
+    px[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv;
+}
+
+/**
+ * The cut-out for the KNIFE plate, when the mount has no alpha for it: opaque
+ * on the scratched digits, clear everywhere else.
+ *
+ * In game a knife's kill count is scratched into the blade — no plate, the
+ * paint simply missing where the numerals are cut. The material does that with
+ * an alpha test (F_ALPHA_TEST, reference 0.667) on the colour atlas's alpha,
+ * but the colour atlas inside the module's glTF comes out flat grey with NO
+ * alpha, so taken as-is the whole 3.9 x 1cm quad draws as a grey sticker. The
+ * stattrak-art extraction step ships the real one; this is the fallback for a
+ * mount extracted before it.
+ *
+ * The digit shapes survive in the normal atlas: its background is one flat
+ * normal and every stroke bends away from it. So the mask is how far a texel
+ * bends, as a SMOOTH ramp rather than a threshold — run on an enlarged band
+ * (see digitBand) the alpha test then cuts along a smooth contour instead of
+ * the texel grid.
+ */
+export function engravingMask(normals: HTMLCanvasElement): HTMLCanvasElement {
+  const { width: w, height: h } = normals;
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const src = normals.getContext("2d")?.getImageData(0, 0, w, h);
+  const ctx = out.getContext("2d");
+  if (!src || !ctx) return out;
+  const px = src.data;
+  // The background is whatever normal covers most of the strip — measured
+  // (128, 117, 254), not the textbook (128, 128, 255), so it is read rather
+  // than assumed.
+  const votes = new Map<number, number>();
+  for (let i = 0; i < px.length; i += 4 * 7) {
+    const key = (px[i] << 8) | px[i + 1];
+    votes.set(key, (votes.get(key) ?? 0) + 1);
+  }
+  let bg = 0;
+  let most = -1;
+  for (const [key, n] of votes) if (n > most) [bg, most] = [key, n];
+  const r0 = bg >> 8;
+  const g0 = bg & 0xff;
+  // 0 below a bend of 4/255, 1 above 16: the 0.667 test lands at 12, which
+  // traces the groove's shoulder rather than its floor or the flat around it.
+  const img = ctx.createImageData(w, h);
+  for (let p = 0; p < w * h; p++) {
+    const bend = Math.hypot(px[p * 4] - r0, px[p * 4 + 1] - g0);
+    const a = Math.round(255 * Math.min(1, Math.max(0, (bend - 4) / 12)));
+    const o = p * 4;
+    img.data[o] = img.data[o + 1] = img.data[o + 2] = a;
+    img.data[o + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
 // Typed as plain number[] rather than 3-tuples because these come straight
 // from a JSON import, which widens tuples — asserting the narrower type would
 // be a cast that proves nothing. Length is checked where it's consumed.

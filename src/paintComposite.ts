@@ -31,6 +31,7 @@
 // - pattern & wear & grunge scale all multiply weaponLength/36 for
 //   spray/anodized-air styles, uvScale for everything else
 import { getAssetOrigin, withAssetVersion } from "./api";
+import { loadRawPngTexture } from "./rawPng";
 import {
   buildValveMaterials,
   loadValveCombo,
@@ -152,6 +153,13 @@ export interface PaintDef {
    *  finish's artwork and must beat the weapon's generic extracted mask —
    *  see the pick in compositePaint. 269 of 1479 materials ship one. */
   masksSkinSpecific: boolean;
+  /**
+   * The finish's "Use Custom Material Mask" switch (g_bOverrideDefaultMasks).
+   * It is THE rule the game uses: the vcompmat's own COPY_PROPERTY copies
+   * g_tPaintByNumberMasks over g_tMasks exactly when this is 1, and otherwise
+   * the weapon's own mask stands. See the pick in compositePaint.
+   */
+  overrideDefaultMasks: boolean;
   ao?: string;
   baseColor?: string;
   baseRM?: string;
@@ -339,12 +347,18 @@ async function fetchPaintDef(paintMaterial: string): Promise<PaintDef | null> {
       };
       vmatJson = vmat;
       tex = (n) => vmat.m_textureParams?.find((t) => t.m_name === n)?.m_pValue;
+      // Each from the OTHER list too: Valve does not file params by their
+      // g_fl / g_b prefix. P90 | Death by Kitty keeps g_flPatternTexCoordScale
+      // (2) and its rotation in m_intParams, and a float read of the float list
+      // alone took the default 1 — every kitty twice the size the game draws.
+      const fromFloats = (n: string) => vmat.m_floatParams?.find((f) => f.m_name === n)?.m_flValue;
+      const fromInts = (n: string) => vmat.m_intParams?.find((f) => f.m_name === n)?.m_nValue;
       flt = (n, d) => {
-        const v = vmat.m_floatParams?.find((f) => f.m_name === n)?.m_flValue;
+        const v = fromFloats(n) ?? fromInts(n);
         return v != null ? Number(v) : d;
       };
       int = (n, d) => {
-        const v = vmat.m_intParams?.find((f) => f.m_name === n)?.m_nValue;
+        const v = fromInts(n) ?? fromFloats(n);
         return v != null ? Number(v) : d;
       };
       vec = (n) => vmat.m_vectorParams?.find((x) => x.m_name === n)?.m_value?.map(Number);
@@ -654,6 +668,7 @@ async function fetchPaintDef(paintMaterial: string): Promise<PaintDef | null> {
       // g_tMasks first meant those skins coloured against a stand-in mask.
     masks: loose.get("g_tPaintByNumberMasks") ?? t("g_tMasks"),
       masksSkinSpecific: loose.has("g_tPaintByNumberMasks"),
+      overrideDefaultMasks: int("g_bOverrideDefaultMasks", 0) !== 0,
       // Overlay layer: a second artwork pass composited over the paint. ~10% of
       // finishes use it and ~4% have NO pattern at all, so without this they
       // render as flat white. Declarations below are all from the shader's own
@@ -885,7 +900,9 @@ const NDIV = 1 + (IM - 1) / NTAB;
 const AM = 1.0 / IM;
 const RNMX = 1.0 - 1.2e-7;
 
-class UniformRandomStream {
+// Exported for gloveCompositeModern: a glove's RANDOM_ROLL mutator draws from
+// the same stream, just in its own order.
+export class UniformRandomStream {
   private idum: number;
   private iy = 0;
   private iv = new Array<number>(NTAB);
@@ -1760,7 +1777,10 @@ void main() {
 // suffix is a version suffix nobody bumps.
 // The Valve runtime's epilogue + revision ride along: most composites are now
 // rendered by it, not by FRAG, and a change there must re-bake the store too.
-registerCompositeShader(VERT, FRAG + VALVE_RUNTIME_REV);
+// So does the input decode: before rawPng.ts, Safari composited anodized
+// finishes on fully-transparent masks as the bare weapon and could upload them.
+const INPUT_DECODE_REV = "raw-png-1";
+registerCompositeShader(VERT, FRAG + VALVE_RUNTIME_REV + INPUT_DECODE_REV);
 
 // ---- Texture loading ------------------------------------------------------------
 // One shared cache across composites; colorSpace flags follow the shader's
@@ -1862,8 +1882,10 @@ function loadTex(
   const key = `${url}|${opts.srgb ? "s" : "l"}|${opts.wrap ? "w" : "c"}${akey}`;
   let cached = texCache.get(key);
   if (!cached) {
-    cached = new THREE.TextureLoader()
-      .loadAsync(url)
+    // The weapon inputs are PNGs with data in their alpha, which Safari empties
+    // when the file is fully transparent -- see rawPng.ts.
+    cached = loadRawPngTexture(THREE, url)
+      .then((raw) => raw ?? new THREE.TextureLoader().loadAsync(url))
       .then((t) => {
         t.colorSpace = opts.srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
         if (opts.addr) {
@@ -2141,7 +2163,20 @@ export async function compositePaint(
     //   - case hardening alone: Deagle | Heat Treated (style 7) drifted
     //     12.5 -> 13.6 for no established reason.
     // Style 8 + case hardening is exactly the set this is evidenced for.
-    (def.masksSkinSpecific && def.caseHardening && def.style === 8 ? await urlOf(def.masks) : null) ??
+    //
+    // ...and it was a proxy for the game's own rule, which the vcompmat states
+    // outright: a COPY_PROPERTY of g_tPaintByNumberMasks onto g_tMasks, gated on
+    // g_bOverrideDefaultMasks == 1 ("Use Custom Material Mask"). AXIA sets it;
+    // so do LongDog, Autumn Thicket and Heat Treated. Without it AWP | LongDog
+    // took the AWP's generic metal mask, whose high R sent its whole receiver and
+    // stock down Valve's paint-by-number branch — metalness ~0.9, the white paint
+    // remapped to near-black — where the game (and its own icon) shows white,
+    // non-metal paint. The two drifts measured above were against the rig's
+    // statistical floors, not the game. The case-hardening clause stays for any
+    // material that predates the switch.
+    (def.masksSkinSpecific && (def.overrideDefaultMasks || (def.caseHardening && def.style === 8))
+      ? await urlOf(def.masks)
+      : null) ??
       opts.weapon?.masks ??
       (await urlOf(def.masks)),
     opts.weapon?.ao ?? urlOf(def.ao),

@@ -50,6 +50,22 @@ export interface CharmShading {
    * charmLiquid's parseCharmLiquid, which is the module that knows the shape.
    */
   liquid?: Record<string, unknown>;
+  /**
+   * A detail texture over the albedo — csgo_weapon's F_DETAIL_TEXTURE: mode 0
+   * multiplies, 1 replaces; placed by its own scale / rotation / authored
+   * offset; with `maskByTint`, only where the tint mask is. Charm | 8 Ball IGL's
+   * fortune triangle is one: the pattern grade then recolours it (green,
+   * yellow…), which is why it is applied before the grade, not after.
+   */
+  detail?: {
+    tex: string;
+    mode: number;
+    blend: number;
+    scale: [number, number];
+    offset: [number, number];
+    rotation: number;
+    maskByTint: boolean;
+  };
 }
 export type VfxNode = number | { f: string; a: VfxNode[] };
 
@@ -213,33 +229,26 @@ interface CharmTune extends CharmAdjust {
  * the rail can paint 100000 patterns instantly instead of rendering a hundred.
  */
 /**
- * Params evaluated at a FIXED pattern instead of the item's own — a deliberate
- * deviation from Valve's data, and the only one in this file.
+ * Params evaluated at a FIXED pattern instead of the item's own. Empty: every
+ * dynamic param follows the item's pattern, as Valve's data says.
  *
- * `g_flLiquidLevelHeight = lerp(0.45, 0.8, frac(seed * 100))` genuinely is in
- * Charm | Butane Buddy's vmat. The bytecode decodes cleanly with no leftover
- * bytes (`07 45c` `07 8` `19 $KeychainSeed` `07 100` `15 mul` `06 03 frac`
- * `06 08 lerp` `00`), and `frac(seed * 100)` sweeps the fill through its whole
- * 0.45..0.8 range every 1000 patterns — a third of the vessel's height.
+ * It used to hold Charm | Butane Buddy's fill level. Its vmat really does say
+ * `g_flLiquidLevelHeight = lerp(0.45, 0.8, frac(seed * 100))` — the bytecode
+ * decodes cleanly with no leftover bytes (`07 45c` `07 8` `19 $KeychainSeed`
+ * `07 100` `15 mul` `06 03 frac` `06 08 lerp` `00`) — so over the normalised
+ * seed the fill sweeps 45%..80% of the vessel every 1000 patterns: pattern 1
+ * sits lowest, ~500 halfway, 999 fullest, 1000 starts over.
  *
- * We do not honour it, for two reasons:
+ * It was pinned to pattern 1 because the level was reported not to vary in
+ * game and csgoskins' viewer (which has no expression VM at all) never moves
+ * it. Honoured again on request, 2026-10-20. Pinning is one entry here:
+ * `new Set(["g_flLiquidLevelHeight"])` puts every Butane Buddy back at pattern
+ * 1's level, the one the official icon shows.
  *
- *  1. It is not what the item does in game. Reported repeatedly from the actual
- *     item; the level is not what its patterns vary.
- *  2. csgoskins' viewer does not honour it either, and theirs is the render that
- *     matches CS2. Their bundle contains NO expression VM at all — zero uses of
- *     `frac`, no opcode table, no dynamic-param evaluator — so every material
- *     param is whatever their server resolved once, and their charm-pattern
- *     slider cannot move the level.
- *
- * The hue is NOT pinned: `lerp(0, 320, seed)` is the visible, famous behaviour of
- * this charm's patterns, and it is confirmed correct by the official icon being
- * RED at pattern 1 (a normalised seed gives ~0 shift there; a raw one would give
- * 320 degrees and the wrong colour).
- *
- * To restore Valve's behaviour, empty this set. Nothing else changes.
+ * The hue was never pinned: `lerp(0, 320, seed)` is this charm's famous
+ * pattern behaviour, confirmed by the official icon being RED at pattern 1.
  */
-const PINNED_TO_PREVIEW = new Set(["g_flLiquidLevelHeight"]);
+const PINNED_TO_PREVIEW = new Set<string>();
 /** Pattern 1 normalised — every charm's previewSeed, so this is the level the
  *  official icon and csgoskins both show. */
 const PREVIEW_T = 1 / 100000;
@@ -399,6 +408,10 @@ export function charmAdjustSrgb(px: Uint8ClampedArray, adj: CharmAdjust, mask?: 
  * hue 172 (teal), matching the published pattern guide band for band.
  */
 const charmAdjustGlsl = (hasMapUv: boolean) => `
+uniform sampler2D uDetail;
+uniform vec4 uDetailXf;
+uniform vec2 uDetailOff;
+uniform vec4 uDetailOn;
 uniform vec2 uRoughAdjust;
 uniform vec4 uColorAdjust;
 uniform vec2 uCharmMask;
@@ -432,7 +445,41 @@ vec3 csCharmAdjust( vec3 linear ) {
   vec3 hued = mix( vec3( dot( c, W ) ), rot, pow( hsvSat, 0.125 ) );
   vec3 outC = clamp( mix( vec3( dot( hued, W ) ), hued, uColorAdjust.y ), 0.0, 1.0 );
   return csToLinear( mix( authored, outC, csCharmMask() ) );
+}
+// The detail texture, in the albedo's own UV — csgo_weapon.slang's
+// g_vDetailTexCoordXform / g_vDetailTexCoordOffset (see detailUniforms).
+// uDetailOn = (on, replace, blend, masked).
+vec3 csCharmDetail( vec3 albedo ) {
+  ${
+    hasMapUv
+      ? `if ( uDetailOn.x < 0.5 ) return albedo;
+  vec2 duv = vec2( dot( vMapUv, uDetailXf.xy ), dot( vMapUv, uDetailXf.zw ) ) + uDetailOff;
+  vec3 det = texture2D( uDetail, duv ).rgb;
+  float k = uDetailOn.z * ( uDetailOn.w > 0.5 ? csCharmMask() : 1.0 );
+  return uDetailOn.y > 0.5 ? mix( albedo, det, k ) : albedo * mix( vec3( 1.0 ), det, k );`
+      : "return albedo;"
+  }
 }`;
+
+/**
+ * A detail's placement as the shader reads it. csgo_weapon.slang:
+ *
+ *   g_vDetailTexCoordXform = scale.xxyy * (cos, -sin, sin, cos)
+ *   g_vDetailTexCoordOffset = -0.5 * scale * (cos - sin, sin + cos) + offset + 0.5
+ *
+ * i.e. scaled and turned about the texture's centre, then moved. The offset is
+ * shipped as authored, so this is where the fold happens.
+ */
+function detailUniforms(d: NonNullable<CharmShading["detail"]>) {
+  const r = (d.rotation * Math.PI) / 180;
+  const c = Math.cos(r);
+  const sn = Math.sin(r);
+  const [sx, sy] = d.scale;
+  return {
+    xf: [sx * c, -sx * sn, sy * sn, sy * c] as const,
+    off: [-0.5 * sx * (c - sn) + d.offset[0] + 0.5, -0.5 * sy * (sn + c) + d.offset[1] + 0.5] as const,
+  };
+}
 
 /**
  * Correct the raw texture channels to what csgo_weapon.vfx actually renders.
@@ -506,6 +553,7 @@ export function tuneCharmShading(
     if (
       !seedDriven &&
       !v.liquid &&
+      !tune.detail &&
       v.roughContrast === 1 &&
       v.roughBright === 1 &&
       !v.graded &&
@@ -558,6 +606,19 @@ export function tuneCharmShading(
     owned.userData.lqMetal = lqMetal ?? whiteTexture(THREE);
     owned.userData.lqMetalBound = !!lqMetal;
     if (v.liquid) setCharmLiquidUniforms(THREE, owned, v.liquid);
+    // The detail texture, bound on every tuned charm for the same one-program
+    // reason the mask is; uDetailOn.x is what decides whether it is read.
+    const detailTex = tune.detail ? (masks?.get(`${mat.name}\u0000detail`) ?? null) : null;
+    const du = tune.detail && detailTex ? detailUniforms(tune.detail) : null;
+    owned.userData.detail = detailTex ?? whiteTexture(THREE);
+    owned.userData.detailXf = new THREE.Vector4(...(du?.xf ?? [1, 0, 0, 1]));
+    owned.userData.detailOff = new THREE.Vector2(...(du?.off ?? [0, 0]));
+    owned.userData.detailOn = new THREE.Vector4(
+      du ? 1 : 0,
+      tune.detail?.mode === 1 ? 1 : 0,
+      tune.detail?.blend ?? 1,
+      tune.detail?.maskByTint ? 1 : 0,
+    );
     // Material.clone does not carry onBeforeCompile, so a patch the material
     // already had is lost under ours unless it is run first by hand. The pet
     // chick's fur was: its no-flip (petMaterial.ts) went, and every fur card
@@ -572,6 +633,10 @@ export function tuneCharmShading(
       shader.uniforms.uColorAdjust = { value: owned.userData.colorAdjust };
       shader.uniforms.uCharmMask = { value: owned.userData.charmMask };
       shader.uniforms.uTintMask = { value: owned.userData.tintMask };
+      shader.uniforms.uDetail = { value: owned.userData.detail };
+      shader.uniforms.uDetailXf = { value: owned.userData.detailXf };
+      shader.uniforms.uDetailOff = { value: owned.userData.detailOff };
+      shader.uniforms.uDetailOn = { value: owned.userData.detailOn };
       shader.fragmentShader = shader.fragmentShader
         .replace("void main() {", `${charmAdjustGlsl(!!owned.map)}\nvoid main() {`)
         // Three materials fade the roughness adjust by the mask too, and the
@@ -589,7 +654,8 @@ export function tuneCharmShading(
         )
         .replace(
           "#include <map_fragment>",
-          "#include <map_fragment>\n\tdiffuseColor.rgb = csCharmAdjust( diffuseColor.rgb );",
+          // The detail BEFORE the grade: the grade is what recolours it.
+          "#include <map_fragment>\n\tdiffuseColor.rgb = csCharmAdjust( csCharmDetail( diffuseColor.rgb ) );",
         );
       // AFTER the block above, never before: both inject at `void main() {`, so
       // whichever runs last sits closest to it — and the liquid calls
@@ -640,6 +706,7 @@ export async function loadCharmTintMasks(
   const wanted = new Map<string, { path: string; flipY: boolean }>();
   const wantedRough = new Map<string, { path: string; flipY: boolean }>();
   const wantedMetal = new Map<string, { path: string; flipY: boolean }>();
+  const wantedDetail = new Map<string, { path: string; flipY: boolean }>();
   model.traverse((n) => {
     const mesh = n as ThreeNS.Mesh;
     if (!(mesh as unknown as { isMesh?: boolean }).isMesh) return;
@@ -671,15 +738,19 @@ export async function loadCharmTintMasks(
     // The ALBEDO's orientation, carried along, because the mask has to be read
     // in the same one — see the flipY note below.
     if (url && name) wanted.set(name, { path: url, flipY: mat.map?.flipY ?? true });
+    // The detail texture, read in the albedo's UV and so in its orientation too.
+    const det = tune?.detail?.tex;
+    if (typeof det === "string" && name) wantedDetail.set(name, { path: det, flipY: mat.map?.flipY ?? true });
   });
   await Promise.all(
     [...wanted].map(async ([name, { path, flipY }]) => {
       const tex = await loadTexture(paintTextureUrl(path)).catch(() => null);
       if (!tex) return;
-      // MATCH THE ALBEDO'S FLIP. A charm's art reaches us two ways and they do
-      // not agree: the 23 blank-mesh charms fetch theirs as a texture file
-      // (TextureLoader, flipY true), while the other 58 carry theirs inside the
-      // GLB (GLTFLoader, flipY FALSE — glTF's UV origin is top-left). The mask
+      // MATCH THE ALBEDO'S FLIP. A charm's art reaches us two ways: the 23
+      // blank-mesh charms fetch theirs as a texture file (dressCharm), the other
+      // 58 carry theirs inside the GLB. Both are glTF-oriented (flipY FALSE —
+      // dressCharm sets it now; it used to be left at TextureLoader's true, and
+      // the art hung upside down). The mask
       // always arrives by the first route, so on a model-owning charm it was
       // sampled upside down: Charm | Lil' Squatch tinted its fur and face and
       // left the shorts the mask actually covers alone.
@@ -737,6 +808,21 @@ export async function loadCharmTintMasks(
         tex.needsUpdate = true;
       }
       out.set(`${name}\u0000metal`, tex);
+    }),
+  );
+  await Promise.all(
+    [...wantedDetail].map(async ([name, { path, flipY }]) => {
+      const tex = await loadTexture(paintTextureUrl(path)).catch(() => null);
+      if (!tex) return;
+      // A PICTURE (sRGB, as g_tDetail is declared) that TILES: its transform
+      // runs the window's UV past [0,1] by design.
+      if (tex.flipY !== flipY || tex.colorSpace !== THREE.SRGBColorSpace || tex.wrapS !== THREE.RepeatWrapping) {
+        tex.flipY = flipY;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.needsUpdate = true;
+      }
+      out.set(`${name}\u0000detail`, tex);
     }),
   );
   return out;
@@ -826,9 +912,26 @@ export async function dressCharm(
   const params = await charmMaterialParams(material);
   if (!params) return false;
   const pick = (...names: string[]) => pickTexture(params, ...names);
-  const load = async (path: string | null) => {
+  // glTF's UV origin is top-left, and these maps are laid on a GLB mesh — so
+  // flipY FALSE, as GLTFLoader sets it for the 58 charms that carry their art
+  // inside the model. The shared loader leaves three's default (true), which
+  // hung every blank-mesh charm's art upside down: Lil' Happy's mouth landed
+  // between its legs and its eyes nowhere. Measured, not assumed: drawn over
+  // kc_missinglink_default's UV0, Lil' Happy's albedo puts the face on the front
+  // island exactly as authored. Only the colour is a picture; the rest are data
+  // and must not be sRGB-decoded on every sample. Set on the cached texture —
+  // these files belong to these charms alone, and tuneCharmShading's masks
+  // follow whatever flip the albedo ends up with.
+  const load = async (path: string | null, srgb = false) => {
     if (!path) return null;
     const tex = await loadTexture(paintTextureUrl(path)).catch(() => null);
+    if (!tex) return null;
+    const space = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+    if (tex.flipY || tex.colorSpace !== space) {
+      tex.flipY = false;
+      tex.colorSpace = space;
+      tex.needsUpdate = true;
+    }
     return tex;
   };
   // `g_tMetalness` is where csgo_weapon.vfx binds the ROUGHNESS texture on a
@@ -836,13 +939,12 @@ export async function dressCharm(
   // feeds roughnessMap and metalness stays 0. Checked against the real
   // material rather than assumed from the slot name.
   const [color, normal, rough, ao] = await Promise.all([
-    load(pick("g_tColor", "g_tColorTexture")),
+    load(pick("g_tColor", "g_tColorTexture"), true),
     load(pick("g_tNormal", "g_tNormalMap")),
     load(pick("g_tMetalness", "g_tRoughness", "g_tRoughnessTexture")),
     load(pick("g_tAmbientOcclusion")),
   ]);
   if (!color) return false; // nothing recognisable to dress it with
-  color.colorSpace = THREE.SRGBColorSpace;
   model.traverse((n) => {
     const mesh = n as ThreeNS.Mesh;
     if (!(mesh as unknown as { isMesh?: boolean }).isMesh) return;
