@@ -38,6 +38,14 @@ Versions of this repository published before this NOTICE file was added
 declared the MIT License in package.json and remain under it.
 
 
+CONTRIBUTIONS
+
+Contributions are accepted only under the terms in CONTRIBUTING.md of the
+upstream repository, which let Luke Policinski license them under any
+terms:
+https://github.com/lukepolo/5stack-inventory-plugin/blob/main/CONTRIBUTING.md
+
+
 OTHER LICENSING
 
 To use this program under terms other than the license above, contact
