@@ -5430,6 +5430,11 @@ async function buildViewer(
    * syncFpvSeat), so once is enough. The real meshes keep rendering and keep
    * their skeleton; the twins share their material, name and userData.
    */
+  /** First person only: each twin's real skinned mesh, and every bone's world
+   *  matrix at the moment the twins were posed — what a sticker needs to follow
+   *  the part it sits on (see partFollowFor). */
+  const twinSource = new Map<import("three").Mesh, import("three").SkinnedMesh>();
+  const bonesAtMount = new Map<import("three").Object3D, import("three").Matrix4>();
   if (fpvSpec) {
     object.updateMatrixWorld(true);
     const v = new THREE.Vector3();
@@ -5438,6 +5443,9 @@ async function buildViewer(
     for (let i = 0; i < weaponMeshes.length; i++) {
       const skinned = weaponMeshes[i] as import("three").SkinnedMesh;
       if (!skinned.isSkinnedMesh) continue;
+      for (const bone of skinned.skeleton.bones) {
+        if (!bonesAtMount.has(bone)) bonesAtMount.set(bone, bone.matrixWorld.clone());
+      }
       const geom = skinned.geometry.clone();
       const pos = geom.getAttribute("position");
       const nrm = geom.getAttribute("normal");
@@ -5471,7 +5479,56 @@ async function buildViewer(
       twin.matrix.copy(skinned.matrixWorld);
       twin.matrixWorld.copy(skinned.matrixWorld);
       weaponMeshes[i] = twin;
+      twinSource.set(twin, skinned);
     }
+  }
+
+  /**
+   * FIRST PERSON: a sticker rides the part it is on.
+   *
+   * Stickers are cut once, in world space, from the twins above, so they are
+   * where the parts were at mount. The body never moves in this mode, but its
+   * parts do: the reload clip takes the AK-47's magazine out and back, and the
+   * sticker on it stayed in the air where the magazine had been.
+   *
+   * So a sticker takes the bone that carries most of the skin under its centre
+   * and follows that bone's motion since mount. For a vertex skinned to bone B,
+   *   world = M · bindMatrixInverse · B · boneInverse · bindMatrix · v,
+   * and only B changes, so
+   *   world_now = M · BI · B_now · B_mount⁻¹ · BI⁻¹ · M⁻¹ · world_mount.
+   * `pre` and `post` are the two constant ends of that. Rigid, by the centre's
+   * bone: a sticker that straddles two parts goes with the one under its
+   * middle, which the game's own decals do too.
+   */
+  type PartFollow = { bone: import("three").Object3D; pre: import("three").Matrix4; post: import("three").Matrix4 };
+  function partFollowFor(at: SurfacePoint | null): PartFollow | null {
+    const skinned = at ? twinSource.get(at.mesh) : undefined;
+    if (!at || !skinned || !at.tri || !at.bary) return null;
+    const si = skinned.geometry.getAttribute("skinIndex");
+    const sw = skinned.geometry.getAttribute("skinWeight");
+    if (!si || !sw) return null;
+    const weight = new Map<number, number>();
+    for (let j = 0; j < 3; j++) {
+      for (let k = 0; k < 4; k++) {
+        const w = sw.getComponent(at.tri[j], k) * at.bary[j];
+        if (w > 0) {
+          const b = si.getComponent(at.tri[j], k);
+          weight.set(b, (weight.get(b) ?? 0) + w);
+        }
+      }
+    }
+    let best = -1;
+    let most = 0;
+    for (const [b, w] of weight) if (w > most) [best, most] = [b, w];
+    const bone = skinned.skeleton.bones[best];
+    const mount = bone ? bonesAtMount.get(bone) : undefined;
+    if (!bone || !mount) return null;
+    // `pre` is M · BI, and `post` must undo exactly that. NOT bindMatrix · M⁻¹:
+    // bindMatrix is the mesh's world matrix when it was BOUND, and the viewer
+    // scales and centres the model after that, so it is no inverse of anything
+    // here — every sticker took a constant offset and flew off the gun.
+    const pre = skinned.matrixWorld.clone().multiply(skinned.bindMatrixInverse);
+    return { bone, pre, post: mount.clone().invert().multiply(pre.clone().invert()) };
   }
   /**
    * The subset that carries TEXCOORD_1 — i.e. the surfaces the game maps
@@ -5639,7 +5696,15 @@ async function buildViewer(
     return built;
   }
 
-  type SurfacePoint = { mesh: import("three").Mesh; point: import("three").Vector3; normal: import("three").Vector3 };
+  type SurfacePoint = {
+    mesh: import("three").Mesh;
+    point: import("three").Vector3;
+    normal: import("three").Vector3;
+    /** The triangle's vertices and the point's weights on them — for reading
+     *  the skin under it (partFollowFor). Absent from a plain raycast hit. */
+    tri?: [number, number, number];
+    bary?: [number, number, number];
+  };
   /**
    * Every point on the model carrying this TEXCOORD_1 — see above for why there
    * is more than one.
@@ -5679,7 +5744,13 @@ async function buildViewer(
           normal.addScaledVector(tmp.fromBufferAttribute(nrm, c), w2);
           normal.transformDirection(mesh.matrixWorld).normalize();
         }
-        out.push({ mesh, point, normal: normal.lengthSq() ? normal : new THREE.Vector3(0, 1, 0) });
+        out.push({
+          mesh,
+          point,
+          normal: normal.lengthSq() ? normal : new THREE.Vector3(0, 1, 0),
+          tri: [a, b, c],
+          bary: [w0, w1, w2],
+        });
       }
     }
     return out;
@@ -6496,7 +6567,7 @@ async function buildViewer(
     // Real anchor when we have the model's markup; the old silhouette guess
     // only as a fallback for weapons we couldn't fetch markup for.
     const { mk, shared } = slotMarkup(st.slot);
-    let hit: { mesh: import("three").Mesh; point: import("three").Vector3; normal: import("three").Vector3 } | null;
+    let hit: SurfacePoint | null;
     // Set on the markup path: the sticker's rectangle in the unwrap. Its presence
     // is what selects the UV cut over the legacy world-space projection.
     let uvCut: { u: number; v: number; size: number; rot: number } | null = null;
@@ -6687,6 +6758,16 @@ async function buildViewer(
     // span measured back into world units, so the grab area still matches what
     // is on screen; decalSizeFor computes exactly that from the uv1 density.
     mesh.userData.stickerRadius = decalSizeFor(st.slot) * 0.5;
+    // First person: ride the part under the sticker's centre (partFollowFor).
+    // The geometry was just cut where the parts were at mount, so the follow
+    // starts again from there.
+    const follow = fpvSpec ? partFollowFor(hit) : null;
+    mesh.userData.partFollow = follow;
+    if (!follow && !mesh.matrixAutoUpdate) {
+      mesh.matrix.identity();
+      mesh.matrixAutoUpdate = true;
+      mesh.matrixWorldNeedsUpdate = true;
+    }
     if (isNew) flashSticker(st.slot);
     if (STICKER_LOG) {
       const end = performance.now();
@@ -11846,6 +11927,17 @@ async function buildViewer(
    */
   const fpvRel = new THREE.Matrix4();
   const fpvLightQ = new THREE.Quaternion();
+  /** Each first-person sticker to where its part is now — see partFollowFor. */
+  function followStickerParts() {
+    for (const mesh of liveMesh.values()) {
+      const f = mesh.userData.partFollow as PartFollow | null | undefined;
+      if (!f) continue;
+      f.bone.updateWorldMatrix(true, false);
+      mesh.matrix.multiplyMatrices(f.pre, f.bone.matrixWorld).multiply(f.post);
+      mesh.matrixAutoUpdate = false;
+      mesh.matrixWorldNeedsUpdate = true;
+    }
+  }
   function syncFpvSeat() {
     if (!fpvFrame || !fpvWpn || !fpvUnbake) return;
     fpvFrame.updateMatrixWorld(true);
@@ -12350,7 +12442,13 @@ async function buildViewer(
   /** Viewmodel clips built on demand, one per action, with their sound cues. */
   const fpvClips = new Map<
     ClipAction,
-    { clip: import("three").AnimationClip; cues: ClipCue[]; prop: import("three").AnimationClip | null }
+    {
+      clip: import("three").AnimationClip;
+      cues: ClipCue[];
+      prop: import("three").AnimationClip | null;
+      /** A gun's moving parts from the viewmodel clip itself — see playFpvAction. */
+      parts: import("three").AnimationAction | null;
+    }
   >();
   /** Cues still to fire for the action playing, in clip order. */
   let fpvCues: ClipCue[] = [];
@@ -12443,6 +12541,7 @@ async function buildViewer(
       arms.rest();
       playProp(null);
       for (const a of weaponActions.values()) a.fadeOut(PARTS_FADE);
+      for (const e of fpvClips.values()) e.parts?.fadeOut(PARTS_FADE);
       onDone?.();
       return;
     }
@@ -12458,10 +12557,41 @@ async function buildViewer(
         return;
       }
       const built = buildViewmodelClip(THREE as unknown as typeof import("three"), raw);
+      /**
+       * A GUN'S PARTS COME FROM THIS CLIP TOO, when it has them.
+       *
+       * They used to come from the weapon GLB's own `reload`/`shoot`, on the
+       * belief that the two are the same animation. They are not. On the AK-47
+       * the GLB's `reload` throws the magazine 20-28" from the gun and turns it
+       * 180 degrees and back between two frames (0.60-0.73s) — the swap, as
+       * the world model plays it — so the held magazine flailed through the
+       * reload nowhere near the hand. The viewmodel clip's own `clip` track
+       * stays within 1.5" of `attachHand_L` from the pull to the insert: it is
+       * authored against these hands, on this clock. Same bone space (the rest
+       * values agree to 0.002"), so it plays on the weapon's skeleton as is.
+       *
+       * `weapon`/`weapon_offset` stay out for the reason the GLB's do: `wpn`
+       * owns the placement.
+       */
+      const vmParts =
+        !fpvKnife && weaponMixer
+          ? buildPropClip(
+              THREE as unknown as typeof import("three"),
+              raw,
+              (b) => !/^(weapon_offset|ag1_hand_[lr])$/i.test(b) && !!object.getObjectByName(b),
+            )
+          : null;
+      let parts: import("three").AnimationAction | null = null;
+      if (vmParts && weaponMixer) {
+        parts = weaponMixer.clipAction(vmParts);
+        parts.setLoop(THREE.LoopOnce, 1);
+        parts.clampWhenFinished = true;
+      }
       entry = {
         clip: built.clip,
         cues: [...(raw.sounds ?? [])].sort((a, b) => a.t - b.t),
         prop: fpvKnife ? buildPropClip(THREE as unknown as typeof import("three"), raw, (b) => !!object.getObjectByName(b)) : null,
+        parts,
       };
       fpvClips.set(action, entry);
       // The fire clip carries the weapon's rate of fire — see the extractor.
@@ -12471,7 +12601,11 @@ async function buildViewer(
       }
     }
     if (!arms) return;
-    const parts = weaponActions.get(action);
+    // The viewmodel's own parts when the clip has them; the GLB's otherwise.
+    const glbParts = weaponActions.get(action);
+    const parts = entry.parts ?? glbParts;
+    // Never both: two actions on the same bones blend into a third motion.
+    if (entry.parts && glbParts) glbParts.stop();
     arms.play(entry.clip, () => {
       parts?.fadeOut(PARTS_FADE);
       playProp(null);
@@ -13872,6 +14006,8 @@ async function buildViewer(
       // The weapon follows the clip's own `wpn` track. AFTER the mixer, because
       // that is what moved the node this reads.
       syncFpvSeat();
+      // And the stickers follow the parts the mixer just moved.
+      followStickerParts();
       flash?.update(dt);
       pumpFpvCues();
       pumpFpvAuto();
