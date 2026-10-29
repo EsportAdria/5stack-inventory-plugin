@@ -5,6 +5,7 @@ on:
     branches:
       - "test/inventory-recovery-20261017"
       - "test/inventory-memory-20261018"
+      - "test/inventory-steam-egress-20261029"
   workflow_dispatch:
 
 concurrency:
