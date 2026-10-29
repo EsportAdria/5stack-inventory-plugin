@@ -6,16 +6,22 @@ still gets 200, a reverse proxy there lets the sync leave from its IP.
 
 The backend requests `${STEAM_COMMUNITY_URL}/inventory/<steamid>/730/2?...`
 and keeps the status, headers and body it gets back, so a 429 from Steam still
-reaches the backend as a 429. Unset or empty keeps `https://steamcommunity.com`.
-A trailing slash is ignored.
+reaches the backend as a 429. It does not follow redirects, so a redirect can't
+send the request around the proxy. Unset or empty keeps
+`https://steamcommunity.com`; a trailing slash is ignored, and a value that
+isn't an http(s) URL stops the backend at startup.
 
 A minimal nginx proxy that forwards only the inventory path:
 
 ```nginx
 server {
   listen 8080;
-  resolver 10.43.0.10 valid=60s;  # the cluster DNS service
-  location /inventory/ {
+  resolver 10.43.0.10 valid=60s ipv6=off;  # the cluster DNS service
+  # Only the one request the backend makes, without cookies either way.
+  location ~ "^/inventory/\d{17}/730/2$" {
+    limit_except GET { deny all; }
+    proxy_set_header Cookie "";
+    proxy_hide_header Set-Cookie;
     set $steam https://steamcommunity.com;
     proxy_pass $steam;
     proxy_set_header Host steamcommunity.com;
