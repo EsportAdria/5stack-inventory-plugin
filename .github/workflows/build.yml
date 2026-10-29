@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: inventory-backend-candidate
+  group: inventory-backend-candidate-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
