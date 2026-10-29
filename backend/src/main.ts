@@ -3,6 +3,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { promises as fs } from "node:fs";
 import os from "node:os";
+import { machineMemoryMb } from "./machineMemory.ts";
+import { extractWorkerLimit } from "./extractWorkers.ts";
+import { createSteamCooldown, steamRateLimitedMessage } from "./steamCooldown.ts";
 import path from "node:path";
 import Fastify, { LogController } from "fastify";
 // Type-only, so node's type stripping erases it — "pg" is CJS and has no such
@@ -14,6 +17,7 @@ import { parseByteRange } from "./byteRange.mjs";
 import { getIdentity } from "./identity.ts";
 import { isAllowedOrigin, originPolicyFromEnv, refuseCrossSite, requestHost } from "./originGuard.ts";
 import { autoExtractor, installProblem } from "./autoExtract.ts";
+import { readSavedExtractState, IDLE_STATE, type ExtractState } from "./extractState.ts";
 import {
   GAME_PLUGIN_SLUG,
   deleteTypeCfg,
@@ -483,6 +487,7 @@ const ASSET_TYPES: Record<string, string> = {
   ".webp": "image/webp",
   ".png": "image/png",
   ".glb": "model/gltf-binary",
+  ".exr": "application/octet-stream",
   // Music kit menu themes. Both containers, because the extractor probes what
   // Source2Viewer actually wrote rather than assuming mp3 — the format follows
   // the codec inside the .vsnd_c.
@@ -3767,15 +3772,32 @@ interface SteamPage {
 const STEAM_PAGE = 1000;
 const STEAM_MAX_PAGES = 10;
 
+// Steam rate-limits the public inventory endpoint per IP, and some hosting IPs
+// get refused (429) even when idle. Point this at a reverse proxy on another
+// host to send only the inventory fetch out through that host's IP.
+const STEAM_COMMUNITY_URL = (process.env.STEAM_COMMUNITY_URL || "https://steamcommunity.com").trim().replace(/\/+$/, "");
+// Fail at startup, not on every sync as a vague "Couldn't reach Steam".
+if (!/^https?:\/\/[^/]+/.test(STEAM_COMMUNITY_URL)) {
+  throw new Error(`STEAM_COMMUNITY_URL must be an http(s) URL, got "${STEAM_COMMUNITY_URL}"`);
+}
+
 // NB: plain field assignment, not a constructor parameter property — node's
 // --experimental-strip-types only erases types, so it can't emit the implicit
 // `this.status = status` a parameter property relies on.
 class SteamFetchError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  retryAfterMs?: number;
+  constructor(status: number, message: string, retryAfterMs?: number) {
     super(message);
     this.status = status;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+const steamCooldown = createSteamCooldown();
+
+function steamRateLimited(ms: number) {
+  return new SteamFetchError(429, steamRateLimitedMessage(ms), ms);
 }
 
 async function fetchSteamInventory(steamId: string) {
@@ -3783,14 +3805,19 @@ async function fetchSteamInventory(steamId: string) {
   const byClass = new Map<string, SteamDescription>();
   let start: string | undefined;
   let complete = false;
+  const waiting = steamCooldown.remainingMs(Date.now());
+  if (waiting > 0) throw steamRateLimited(waiting);
   for (let page = 0; page < STEAM_MAX_PAGES; page++) {
     const url =
-      `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=${STEAM_PAGE}` +
+      `${STEAM_COMMUNITY_URL}/inventory/${steamId}/730/2?l=english&count=${STEAM_PAGE}` +
       (start ? `&start_assetid=${start}` : "");
     let payload: SteamPage;
     try {
       const res = await fetch(url, {
         signal: AbortSignal.timeout(15000),
+        // A redirect would be followed from this host's own IP, quietly skipping
+        // a STEAM_COMMUNITY_URL proxy; surface it as a failed sync instead.
+        redirect: "manual",
         headers: { "User-Agent": "5stack-inventory-plugin" },
       });
       if (res.status === 403 || res.status === 401) {
@@ -3798,6 +3825,9 @@ async function fetchSteamInventory(steamId: string) {
           400,
           "Your Steam inventory is private. Set it to Public in Steam privacy settings and retry — we only ever read public data.",
         );
+      }
+      if (res.status === 429) {
+        throw steamRateLimited(steamCooldown.trip(res.headers.get("retry-after"), Date.now()));
       }
       if (!res.ok) {
         throw new SteamFetchError(502, `Steam responded ${res.status} — try again in a minute.`);
@@ -3902,6 +3932,7 @@ app.post("/api/inventory/import-steam", async (request, reply) => {
     // with request logging off a failed sync would otherwise produce NO output
     // at all — the one case where silence is most misleading.
     app.log.warn(`[steam-sync] ${identity.steamId}: FAILED (${e.status ?? 502}) — ${e.message}`);
+    if (e.retryAfterMs) reply.header("Retry-After", String(Math.ceil(e.retryAfterMs / 1000)));
     return reply.status(e.status ?? 502).send({ error: e.message });
   }
   const { assets, byClass, complete } = inventory;
@@ -5741,28 +5772,7 @@ const PANEL_RESERVE_MB = 3072;
 const EXTRACT_JOBS_DEFAULT = 1;
 
 function extractCores(): number {
-  return Math.max(1, os.cpus().length || 1);
-}
-
-/** Node memory, for the panel's "N workers ≈ X GB of Y GB" warning. Reads
- *  /proc/meminfo first: under a cgroup os.freemem() reports the HOST's free
- *  pages, and MemAvailable is the number that actually predicts an OOM. */
-async function machineMemoryMb(): Promise<{ totalMb: number | null; availableMb: number | null }> {
-  try {
-    const meminfo = await fs.readFile("/proc/meminfo", "utf8");
-    const field = (name: string) => {
-      const m = new RegExp(`^${name}:\\s+(\\d+) kB`, "m").exec(meminfo);
-      return m ? Math.round(Number(m[1]) / 1024) : null;
-    };
-    const totalMb = field("MemTotal");
-    const availableMb = field("MemAvailable");
-    if (totalMb) return { totalMb, availableMb };
-  } catch {
-    // Not Linux — fall through to the os module.
-  }
-  const totalMb = Math.round(os.totalmem() / 1024 / 1024);
-  const freeMb = Math.round(os.freemem() / 1024 / 1024);
-  return { totalMb: totalMb || null, availableMb: freeMb || null };
+  return extractWorkerLimit(os.cpus().length || 1, process.env.INVENTORY_EXTRACT_MAX_JOBS);
 }
 
 async function readExtractJobs(): Promise<number> {
@@ -5786,40 +5796,13 @@ async function writeExtractJobsFile(jobs: number): Promise<void> {
   }
 }
 
-type ExtractState = {
-  state: "idle" | "running" | "succeeded" | "failed" | "interrupted";
-  startedAt: string | null;
-  finishedAt: string | null;
-  exitCode: number | null;
-  error: string | null;
-  log: string;
-};
-const IDLE_STATE: ExtractState = {
-  state: "idle",
-  startedAt: null,
-  finishedAt: null,
-  exitCode: null,
-  error: null,
-  log: "",
-};
-
-// Only one run at a time, and only this process can be running it — a child
-// dies with its parent, so "running in the file" + "no child here" means a
-// restart killed it (reported as `interrupted`, not a phantom `running`).
+// A run can outlive the API process, so consult the existing PID lock before
+// reporting an interruption. The admin status route uses that same lock.
 let extractChild: ChildProcess | null = null;
 let extractLog: string[] = [];
 
 async function readExtractState(): Promise<ExtractState> {
-  try {
-    const raw = await fs.readFile(EXTRACT_STATE_FILE, "utf8");
-    const parsed = { ...IDLE_STATE, ...(JSON.parse(raw) as Partial<ExtractState>) };
-    if (parsed.state === "running" && !extractChild) {
-      return { ...parsed, state: "interrupted", error: "The backend restarted while extraction was running." };
-    }
-    return parsed;
-  } catch {
-    return IDLE_STATE; // never run, or the mount was wiped
-  }
+  return readSavedExtractState(EXTRACT_STATE_FILE, extractChild != null, liveExtractionPid);
 }
 
 // ---- Pipeline version: is what's on the mount what this build expects? ------
@@ -6270,7 +6253,7 @@ app.get("/api/admin/extract-models", async (request, reply) => {
  *  the setting, what the box has, and what a worker costs at each end of the
  *  measured range. */
 async function extractWorkerInfo() {
-  const { totalMb, availableMb } = await machineMemoryMb();
+  const { totalMb, availableMb, scope } = await machineMemoryMb();
   return {
     jobs: await readExtractJobs(),
     cores: extractCores(),
@@ -6279,6 +6262,7 @@ async function extractWorkerInfo() {
     panelReserveMb: PANEL_RESERVE_MB,
     memTotalMb: totalMb,
     memAvailableMb: availableMb,
+    memoryScope: scope,
   };
 }
 
