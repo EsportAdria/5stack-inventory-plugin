@@ -44,14 +44,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           # 24 for `--experimental-strip-types`: every tool here is TypeScript
           # run directly, with no build step. Matches codepier.yaml's node:24.
-          node-version: "24"
+          node-version: "24.22.1"
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -80,6 +80,9 @@ jobs:
 
       - name: Steam import covers the economy
         run: npm run check:steam-sync
+
+      - name: Steam sync backs off when Steam rate-limits the server
+        run: npm run check:steam-cooldown
 
       - name: Inspect link round-trips
         run: npm run check:inspect
@@ -135,16 +138,18 @@ jobs:
       - name: A live extraction survives an API process restart
         run: npm run check:extract-state
 
-      - name: Model textures fit a bounded worker memory budget
-        run: npm run check:model-textures
+      - name: API and extraction script enforce the configured worker ceiling
+        run: npm run check:extract-workers
 
       - name: Extraction memory guidance respects container limits
         run: npm run check:machine-memory
 
-      - name: API and extraction script enforce the configured worker ceiling
-        run: npm run check:extract-workers
+      - name: Model textures fit a bounded worker memory budget
+        run: npm run check:model-textures
+
       - name: Schema extraction and final progress complete honestly
         run: npm run check:extract-completion
+
       - name: Float paint inputs keep their data and remain loadable
         run: npm run check:paint-inputs
 

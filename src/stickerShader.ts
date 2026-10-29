@@ -33,8 +33,9 @@
  *   - Wear runs before the tint/holo work here, where the game runs it after
  *     (sticker.glsl:688 vs :548): only the scratch RGB darkening of worn effect
  *     stickers differs, never the shape of the erosion.
- *   - The holo view term is dot(V,N); Valve adds dot(V,lightDir) on top
- *     (sticker.glsl:647), which needs a scene light vector we don't have here.
+ *   - The holo view term: Valve adds dot(V,N) + dot(V,lightDir)
+ *     (sticker.glsl:647). The light half is a constant here, STK_HOLO_LIGHT,
+ *     calibrated on a lenticular sticker in the game's inspect view.
  *   - The glitter sparkle reflects about normal+flake rather than the full
  *     tangent-frame flake normal (sticker.glsl:495) — no tangent basis in a
  *     three chunk. Structure and constants are otherwise the decompile's.
@@ -71,6 +72,21 @@ export interface StickerSfx {
 }
 
 /** Extra knobs for applyStickerSfx that are about the ART, not the material. */
+/**
+ * Per-material uniforms the live 3D viewer writes every frame to make holo and
+ * lenticular stickers follow the camera and the light. `uHoloLive` 0 (the
+ * default, and every baked card) keeps the fixed formula; see the holo branch.
+ * Eye and light are VIEW-space; the eye is a point, the light a direction.
+ */
+export interface StickerHoloLive {
+  uHoloLive: { value: number };
+  uHoloEye: { value: ThreeNS.Vector3 };
+  uHoloLight: { value: ThreeNS.Vector3 };
+  uHoloGlint: { value: ThreeNS.Vector3 };
+  uHoloBias: { value: number };
+  uHoloShine: { value: number };
+}
+
 export interface StickerSfxOpts {
   /**
    * True only when the map really is g_tSticker0 — the game texture whose
@@ -115,6 +131,9 @@ const GLSL = /* glsl */ `
 uniform sampler2D uScratchTex, uSfxMaskTex, uHoloTex, uGlitterTex, uNormRoughTex;
 uniform bool uHasScratch, uHasSfxMask, uHasHolo, uHasGlitter, uHasNormRough;
 uniform bool uPaperBacking, uMetallic, uPreserveRough, uClampSpectrumV;
+uniform vec4 uStkArtUv;
+uniform float uHoloLive, uHoloBias, uHoloShine;
+uniform vec3 uHoloEye, uHoloLight, uHoloGlint;
 uniform bool uExpandAlpha, uPbrFit, uLegacyTint, uSelfIllum;
 uniform float uWear, uWearScratches, uSfxColorBoost, uGlitterScale, uColorBoost, uTintSaturate;
 uniform vec2 uWearBias;
@@ -140,6 +159,15 @@ const vec3 STK_HOLO_LEVELS = vec3(0.05, 0.62149, 0.85);
 const vec3 STK_METAL_LEVELS = vec3(0.45, 0.737, 0.92);
 const vec3 STK_DARK_METAL_LEVELS = vec3(0.1, 0.737, 0.92);
 const float STK_BOOST_FACTOR = 63.0;
+/**
+ * dot(V, lightDir) of the game's holo view term (sticker.glsl:647), as a
+ * constant. We have no scene light vector here, and without the term the
+ * spectrum is read a fixed distance off the frame the game shows — invisible on
+ * a rainbow foil, wrong on a LENTICULAR sticker, whose "spectrum" is a set of
+ * frames: Econometer's needle reads FORCE head-on in the inspect view, which is
+ * where 0.6 puts it (0.5 swings it toward BUY, 0.7 toward ECO).
+ */
+const float STK_HOLO_LIGHT = 0.6;
 
 float stkMaxc(vec3 v) { return max(v.x, max(v.y, v.z)); }
 
@@ -152,13 +180,18 @@ float stkSmoothInv(float e0, float e1, float x) {
 }
 
 /**
- * Valve's 2-channel normal decode, shared by the sticker normal and the glitter
- * flake sheet. 1.00392163 is 256/255 — the encode is not quite symmetric.
+ * The sticker normal and the glitter flake sheet, as they reach US: an ordinary
+ * RGB tangent-space normal map. The game stores them hemi-octahedral in RG
+ * (decoded in the shader with (r+g)-256/255, r-g), but the extractor's
+ * Source2Viewer decodes on export ("auto" decode flags, TextureCodec.HemiOctRB):
+ * it writes n*0.5+0.5 to RGB and moves the roughness that sat in B into ALPHA.
+ * Measured: blue equals the reconstructed z on every one checked. Running the
+ * game's hemi-oct decode over already-decoded RGB bent the normals hard enough
+ * on steep bevels to face away from the camera (the spikes on Bolt Charge
+ * (Foil)'s tip).
  */
 vec3 stkDecodeNormal(vec4 t) {
-  float nx = (t.x + t.y) - 1.00392163;
-  float ny = t.x - t.y;
-  return normalize(vec3(nx, ny, (1.0 - abs(nx)) - abs(ny)));
+  return normalize(t.xyz * 2.0 - 1.0);
 }
 
 /**
@@ -230,11 +263,26 @@ vec3 stkSparkle(vec3 R) {
  * RAW texel (stkRawA, sticker.glsl:703) — the erosion multiply lands on the
  * EXPANDED alpha (sticker.glsl:731).
  */
+/**
+ * The UV every effect texture is read at — the GAME's texture space, not the
+ * decal's.
+ *
+ * The decal's map is not the game's texture: loadStickerTexture crops the art
+ * to its ink, re-squares it and flips it upright for upload. The mask, relief,
+ * scratches and spectrum are the game's own files, full-size and unflipped, so
+ * reading them at the map's UV put every effect upside down and shifted by the
+ * crop. On a rainbow foil that is invisible; on a lenticular, whose mask draws
+ * the moving needle into a precise window, it tore the artwork apart. The map
+ * records its crop (stkArtUv: left, top, width, height of the source) and this
+ * walks back through it. With no crop recorded the uniform is the identity.
+ */
+const STK_UV = /* glsl */ `stkUv = uStkArtUv.xy + vec2(vMapUv.x, 1.0 - vMapUv.y) * uStkArtUv.zw;`;
+
 const WEAR_GLSL = /* glsl */ `
 {
   float stkWear = uWear;
   if (stkWear > 0.0) {
-    float sTex = uHasScratch ? texture2D(uScratchTex, vMapUv).x : 1.0;
+    float sTex = uHasScratch ? texture2D(uScratchTex, stkUv).x : 1.0;
     float s = 1.0 - min(uWearScratches, sTex);
     float scratch = mix(s, s * 0.5, stkWear);
     // Paper backing widens the cutoff to a flat 0.5; everything else derives it
@@ -273,9 +321,9 @@ function loadTex(
   THREE: Three,
   url: string,
   resolve: (p: string) => string,
-  opts: { point?: boolean; wrap?: boolean } = {},
+  opts: { point?: boolean; wrap?: boolean; wrapU?: boolean } = {},
 ): Promise<ThreeNS.Texture | null> {
-  const key = `${url}|${opts.point ? "p" : "l"}|${opts.wrap ? "w" : "c"}`;
+  const key = `${url}|${opts.point ? "p" : "l"}|${opts.wrap ? "w" : opts.wrapU ? "u" : "c"}`;
   let cached = textureCache.get(key);
   if (!cached) {
     cached = new THREE.TextureLoader()
@@ -284,6 +332,7 @@ function loadTex(
         t.colorSpace = THREE.NoColorSpace; // masks and normals, never colour
         t.flipY = false;
         if (opts.wrap) t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        else if (opts.wrapU) t.wrapS = THREE.RepeatWrapping;
         if (opts.point) {
           t.minFilter = t.magFilter = THREE.NearestFilter;
           t.generateMipmaps = false;
@@ -294,6 +343,49 @@ function loadTex(
     textureCache.set(key, cached);
   }
   return cached;
+}
+
+/**
+ * Draw a weapon decal through its weapon's STICKER MASK.
+ *
+ * csgo_weapon's g_tStickerWepInputs (R = TextureStickerMask, G = cavity). The
+ * game draws every sticker through R — white where a sticker may show, black on
+ * hardware, seams and whatever is modelled over the sticker band.
+ *
+ * IN UV0, the weapon's main texture space — NOT the TEXCOORD_1 stickers are
+ * placed in. Measured, not assumed: drawn over the real masks, the UV0 islands
+ * of the C4 and the AK-47 match the mask's white shapes exactly (cut-outs and
+ * all) and the UV1 layout matches nothing. Sampling it at UV1 chopped stickers
+ * into blocks. Sampled at `uvBody`, the body UV0 the decal cutter carries per
+ * vertex (-1 where a mesh has none, read as unmasked); a geometry without that
+ * attribute must not get this patch.
+ *
+ * G is left alone: it sits at ~0.5 across the C4, so it is a signed cavity term,
+ * not a multiplier, and how the game applies it is not known yet.
+ *
+ * Layered over applyStickerSfx rather than folded into it: that patch is skipped
+ * for a plain sticker, and the mask applies to every sticker. Before
+ * alphatest_fragment, which no other patch touches, so it composes with either.
+ */
+export function applyStickerMask(mat: ThreeNS.MeshStandardMaterial, mask: ThreeNS.Texture): void {
+  const prev = mat.onBeforeCompile;
+  const prevKey = mat.customProgramCacheKey.bind(mat);
+  mat.onBeforeCompile = (shader, renderer) => {
+    prev.call(mat, shader, renderer);
+    shader.uniforms.uWepMask = { value: mask };
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nattribute vec2 uvBody;\nvarying vec2 vUvBody;")
+      .replace("#include <uv_vertex>", "#include <uv_vertex>\nvUvBody = uvBody;");
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\nuniform sampler2D uWepMask;\nvarying vec2 vUvBody;")
+      .replace(
+        "#include <alphatest_fragment>",
+        "if (vUvBody.x >= 0.0) diffuseColor.a *= texture2D( uWepMask, vUvBody ).r;\n#include <alphatest_fragment>",
+      );
+  };
+  // Its own program: a masked decal and an unmasked one must not share one.
+  mat.customProgramCacheKey = () => `${prevKey()}|wepMask`;
+  mat.needsUpdate = true;
 }
 
 /**
@@ -323,7 +415,13 @@ export async function applyStickerSfx(
   const [scratchTex, sfxMaskTex, holoTex, glitterTex, normRoughTex] = await Promise.all([
     s.scratches ? loadTex(THREE, s.scratches, resolveUrl) : null,
     s.sfxMask ? loadTex(THREE, s.sfxMask, resolveUrl) : null,
-    s.holoSpectrum ? loadTex(THREE, s.holoSpectrum, resolveUrl) : null,
+    // The game's sampler is g_sAnisoClampV (or plain aniso): U WRAPS. The view
+    // term pushes U well past 1 — head-on it is about 1.6 — so a clamped U
+    // pinned every holo sticker to the spectrum's last column, which on a
+    // lenticular is the black that buried its artwork. V clamps in the shader
+    // when the material says so; leaving it to wrap here too is the
+    // unclamped case.
+    s.holoSpectrum ? loadTex(THREE, s.holoSpectrum, resolveUrl, s.clampSpectrumV ? { wrapU: true } : { wrap: true }) : null,
     s.glitterNormal ? loadTex(THREE, s.glitterNormal, resolveUrl, { point: true, wrap: true }) : null,
     s.normalRoughness ? loadTex(THREE, s.normalRoughness, resolveUrl) : null,
   ]);
@@ -331,6 +429,25 @@ export async function applyStickerSfx(
   // take it, and without one the shader would apply it to the whole sticker.
   const hasGlitter = s.glitter && !!glitterTex && !!sfxMaskTex;
   const hasHolo = s.holo && !!holoTex && !!sfxMaskTex;
+  // The live viewer's handle on the holo view term — see StickerHoloLive.
+  // Created here rather than in onBeforeCompile so the viewer can drive it
+  // before the program even exists, and shared BY REFERENCE with the shader:
+  // writing `.value` each frame is the whole update.
+  const live: StickerHoloLive | null = hasHolo
+    ? {
+        uHoloLive: { value: 0 },
+        uHoloEye: { value: new THREE.Vector3(0, 0, 1) },
+        uHoloLight: { value: new THREE.Vector3(0, 0, 1) },
+        uHoloGlint: { value: new THREE.Vector3(0, 0, 1) },
+        uHoloBias: { value: 0 },
+        uHoloShine: { value: 0 },
+      }
+    : null;
+  mat.userData.stkHolo = live;
+  // Where the decal's map sits inside the game's texture — see STK_UV below.
+  const crop = (mat.map?.userData as { stkArtUv?: number[] } | undefined)?.stkArtUv;
+  const artUv: [number, number, number, number] =
+    crop?.length === 4 ? [crop[0], crop[1], crop[2], crop[3]] : [0, 1, 1, -1];
 
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, {
@@ -357,15 +474,34 @@ export async function applyStickerSfx(
       uSfxColorBoost: { value: s.sfxColorBoost },
       uGlitterScale: { value: s.glitterScale },
       uColorBoost: { value: s.colorBoost },
-      uTintSaturate: { value: s.tintSaturate },
+      // INVERTED against the decompile, on the game's own evidence. Read as
+      // written, g_flTintSaturateSticker0 is how far a METAL sticker's art is
+      // replaced by its tint, and nearly every sticker sets it to 1 — so every
+      // foil would be a flat grey and every gold with a white tint white. The
+      // game's own icons say the opposite, five for five: ESL One Cologne 2014
+      // (Gold) (white tint, 1) is gold, OpTic Gaming (Gold) (gold tint, 0.04)
+      // is solid gold not green, Astralis and qikert (Foil) (grey tint, 1) and
+      // MOUZ (Holo) (metal, 1) keep their red. All five match 1 - value. The
+      // grey foil was reported against the viewer, where hovering a foil
+      // sticker (its glow is the raw art) brought the colour back.
+      uTintSaturate: { value: 1 - s.tintSaturate },
       uWearBias: { value: new THREE.Vector2(s.wearBias[0], s.wearBias[1]) },
       uColorTint: { value: new THREE.Vector3(...s.colorTint) },
+      uStkArtUv: { value: new THREE.Vector4(...artUv) },
+      ...(live ?? {
+        uHoloLive: { value: 0 },
+        uHoloEye: { value: new THREE.Vector3(0, 0, 1) },
+        uHoloLight: { value: new THREE.Vector3(0, 0, 1) },
+        uHoloGlint: { value: new THREE.Vector3(0, 0, 1) },
+        uHoloBias: { value: 0 },
+        uHoloShine: { value: 0 },
+      }),
     });
 
     shader.fragmentShader = shader.fragmentShader
       .replace(
         "#include <common>",
-        `#include <common>\n${GLSL}\nfloat stkRoughKick;\nvec3 stkGlint;\nvec3 stkEmissive;\nfloat stkMetal;\nfloat stkRawA;\nfloat stkExpandedA;`,
+        `#include <common>\n${GLSL}\nfloat stkRoughKick;\nvec3 stkGlint;\nvec3 stkEmissive;\nfloat stkMetal;\nfloat stkRawA;\nfloat stkExpandedA;\nvec2 stkUv;`,
       )
       // After map_fragment so diffuseColor holds the sticker art (rgb AND the
       // alpha the wear chain erodes), and before the lighting includes that
@@ -373,6 +509,7 @@ export async function applyStickerSfx(
       .replace(
         "#include <map_fragment>",
         `#include <map_fragment>
+         ${STK_UV}
          stkRoughKick = 0.0;
          stkGlint = vec3(0.0);
          stkEmissive = vec3(0.0);
@@ -393,7 +530,12 @@ export async function applyStickerSfx(
       .replace(
         "#include <roughnessmap_fragment>",
         `#include <roughnessmap_fragment>
-         if (uHasNormRough) roughnessFactor = texture2D(uNormRoughTex, vMapUv).z;
+         // ALPHA, not blue: the extractor moved the game's roughness channel
+         // there when it decoded the normal (see stkDecodeNormal). Blue is the
+         // reconstructed normal z, ~1 everywhere, which made every sticker
+         // fully rough — foil and gold that should mirror the light came out
+         // matte.
+         if (uHasNormRough) roughnessFactor = texture2D(uNormRoughTex, stkUv).w;
          roughnessFactor = mix(roughnessFactor, 0.8, stkRoughKick);`,
       )
       // Normals are resolved by here, which the effects need for the view term.
@@ -413,9 +555,14 @@ export async function applyStickerSfx(
          // decompile does (sticker.glsl:465), so the relief fades out with the
          // sticker rather than floating past its edge.
          if (uHasNormRough) {
-           vec3 sn = stkDecodeNormal(texture2D(uNormRoughTex, vMapUv));
+           vec3 sn = stkDecodeNormal(texture2D(uNormRoughTex, stkUv));
            sn.y = -sn.y;
            normal = normalize(normal + sn * stkExpandedA * 2.0);
+           // Never let the relief tip the normal away from the surface: a
+           // grazing normal is where the specular term blows up into the white
+           // flares bloom then spreads.
+           float stkFace = dot(normal, nonPerturbedNormal);
+           if (stkFace < 0.3) normal = normalize(normal + nonPerturbedNormal * (0.3 - stkFace) * 2.0);
          }
          // The art BEFORE any finish work: the glitter modulation colour reads
          // it (sticker.glsl:516 refits the raw sample, not the tinted one).
@@ -431,12 +578,12 @@ export async function applyStickerSfx(
          if (uHasGlitter) {
            // 1 - mask.a is the glitter gate: the alpha channel MASKS OUT, the
            // opposite sense to the holo gate in .x. Straight from the decompile.
-           float gate = 1.0 - texture2D(uSfxMaskTex, vMapUv).w;
+           float gate = 1.0 - texture2D(uSfxMaskTex, stkUv).w;
            if (gate > 0.0) {
              // Two octaves at 2.5*scale, the second offset by half a tile, so
              // the flake field does not visibly tile across a 512px sticker.
-             vec2 g0 = vMapUv * (2.5 * uGlitterScale);
-             vec2 g1 = (vec2(0.5) + vMapUv) * (2.5 * uGlitterScale);
+             vec2 g0 = stkUv * (2.5 * uGlitterScale);
+             vec2 g1 = (vec2(0.5) + stkUv) * (2.5 * uGlitterScale);
              vec4 t0 = texture2D(uGlitterTex, g0);
              vec3 f0 = stkDecodeNormal(t0);
              vec4 t1 = texture2D(uGlitterTex, g1);
@@ -478,22 +625,42 @@ export async function applyStickerSfx(
            if (uLegacyTint) diffuseColor.rgb *= uColorBoost;
          }
          // Self-illum rides .w of the normal/rough texture and reads the
-         // POST-refit, PRE-holo albedo (sticker.glsl:625-628). Not scaled by
+         // POST-refit, PRE-holo albedo (sticker.glsl:625-628). Caveat: on a
+         // texture the extractor decoded as hemi-oct (see stkDecodeNormal)
+         // .w now holds the roughness, and the game's own .w did not survive
+         // the export. Not scaled by
          // alpha here: the game's mix(0, emissive, alpha) at :941 is exactly
          // what the alpha blend applies to outgoingLight already.
          if (uSelfIllum && uHasNormRough) {
-           stkEmissive = diffuseColor.rgb * texture2D(uNormRoughTex, vMapUv).w * 2.0;
+           stkEmissive = diffuseColor.rgb * texture2D(uNormRoughTex, stkUv).w * 2.0;
          }
          if (uHasHolo) {
-           vec4 sfxM = texture2D(uSfxMaskTex, vMapUv);
+           vec4 sfxM = texture2D(uSfxMaskTex, stkUv);
            if (sfxM.x > 0.0) {
              // The spectrum is a rainbow RAMP and the mask's G/B are where this
              // texel sits in it. The view term SHIFTS along U, which is the
              // whole effect: turn the sticker and the band sweeps.
              //
-             // Valve adds dot(V,N) + dot(V,lightDir); with no scene light vector
-             // to hand here the view term alone carries the sweep. Flagged.
-             float shift = dot(stkV, normal);
+             // The game's term, sticker.glsl:647: dot(V,N) + dot(V,L), where
+             // N is the GEOMETRIC normal (the interpolated vertex normal,
+             // _24347 — not the normal-mapped one) and V points from the
+             // surface to the camera. So the frame a lenticular shows, and
+             // where a holo's rainbow sits, depend on the camera angle alone,
+             // and a flat sticker shows one coherent frame. Reading the
+             // normal-mapped normal here made frames flicker texel by texel.
+             //
+             // LIVE (the 3D viewer, uHoloLive = 1): V from a virtual eye at an
+             // inspect-like distance, and L a light fixed to the camera, as the
+             // game's inspect light is fixed while the weapon turns. Nothing
+             // moves unless the camera does. uHoloBias keeps the head-on frame
+             // where the game's inspect view shows it.
+             //
+             // STILL (baked cards): the parallel view and the calibrated
+             // constant STK_HOLO_LIGHT, so a card never depends on a light.
+             vec3 holoV = uHoloLive > 0.5 ? normalize(uHoloEye + vViewPosition) : stkV;
+             float shift = uHoloLive > 0.5
+               ? dot(holoV, nonPerturbedNormal) + dot(holoV, uHoloLight) + uHoloBias
+               : dot(stkV, nonPerturbedNormal) + STK_HOLO_LIGHT;
              vec2 suv = vec2(sfxM.y + shift, sfxM.z);
              if (uClampSpectrumV) suv.y = clamp(suv.y, 0.0, 1.0);
              vec3 spectrum = texture2D(uHoloTex, suv).xyz;
@@ -510,6 +677,18 @@ export async function applyStickerSfx(
              // the accumulator is knocked OUT where the holo mask is set
              // (sticker.glsl:669).
              stkMetal *= (1.0 - sfxM.x);
+             if (uHoloLive > 0.5) {
+               // A little SHINE the game gets from its bloom and close inspect
+               // light: a small glint in the foil's own colour off a light that
+               // wanders near the view axis, and a slightly glossier surface.
+               // Kept faint — stronger, with a sliding sheen band on top, it
+               // washed the artwork out under the rainbow, which the game does
+               // not do. Live viewer only.
+               vec3 hh = normalize(uHoloGlint + holoV);
+               float nh = max(dot(normal, hh), 0.0);
+               stkEmissive += refit * pow(nh, 64.0) * 0.6 * uHoloShine * sfxM.x;
+               roughnessFactor = mix(roughnessFactor, min(roughnessFactor, 0.35), 0.5 * sfxM.x * uHoloShine);
+             }
            }
          }
          metalnessFactor = max(metalnessFactor, stkMetal);`,

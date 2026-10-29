@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { build, transform } from 'esbuild';
 import { parseByteRange } from '../backend/src/byteRange.mjs';
+import { IMMUTABLE, openAssetBody, planAsset } from '../backend/src/assetResponse.mjs';
 
 const source = readFileSync(new URL('../src/paintComposite.ts', import.meta.url), 'utf8');
 const loaders = source.slice(source.indexOf('const texCache ='), source.indexOf('\nfunction fallbackTex('));
@@ -16,7 +17,10 @@ const trace = { exr: [], image: [] };
 globalThis.__paintInputTrace = trace;
 const makeTexture = () => ({ image: { width: 2, height: 2, data: new Float32Array([-10, 0, 3, 1, 2, 4, 8, 1, 12, 16, 32, 1, -5, -1, 64, 1]) } });
 const compiled = await build({
-  stdin: { contents: 'const failedUrls = new Set<string>();\n' + loaders + '\nexport {loadTex,loadExr,failedUrls};', loader: 'ts', resolveDir: process.cwd() },
+  // loadTex tries rawPng's exact decoder first (Safari) and falls back to the
+  // browser's loader when it answers null, which is what Chrome always gets.
+  // prefetchedUrl answers the URL itself when nothing was prefetched.
+  stdin: { contents: 'const failedUrls = new Set<string>();\nconst loadRawPngTexture = async (_THREE: unknown, _url: string) => null;\nconst prefetchedUrl = async (url: string) => url;\n' + loaders + '\nexport {loadTex,loadExr,failedUrls};', loader: 'ts', resolveDir: process.cwd() },
   bundle: true, write: false, format: 'esm', platform: 'node',
   plugins: [{ name: 'recording-exr-loader', setup(b) {
     b.onResolve({ filter: /^three\/examples\/jsm\/loaders\/EXRLoader\.js$/ }, () => ({ path: 'exr', namespace: 'fixture' }));
@@ -61,12 +65,12 @@ const root = mkdtempSync(path.join(os.tmpdir(), 'paint-exr-route-'));
 try {
   const bytes = Buffer.from([0x76, 0x2f, 0x31, 0x01, 0, 1, 2, 3]);
   writeFileSync(path.join(root, 'position.exr'), bytes);
-  const register = new Function('app', 'path', 'fs', 'createReadStream', 'parseByteRange', 'ASSET_TYPES', routeJs + '\nreturn serveAssetDir;')(app, path, fs, createReadStream, parseByteRange, ASSET_TYPES);
+  const register = new Function('app', 'path', 'fs', 'createReadStream', 'parseByteRange', 'ASSET_TYPES', 'IMMUTABLE', 'openAssetBody', 'planAsset', routeJs + '\nreturn serveAssetDir;')(app, path, fs, createReadStream, parseByteRange, ASSET_TYPES, IMMUTABLE, openAssetBody, planAsset);
   register('/paints', root);
   const response = await app.inject({ url: '/paints/position.exr?v=35' });
   assert.equal(response.statusCode, 200); assert.deepEqual(response.rawPayload, bytes);
   assert.equal(response.headers['access-control-allow-origin'], '*');
-  assert.equal(response.headers['content-type'], 'application/octet-stream');
+  assert.equal(response.headers['content-type'], 'image/x-exr');
   const head = await app.inject({ method: 'HEAD', url: '/paints/position.exr?v=35' });
   assert.equal(head.statusCode, 200); assert.equal(head.rawPayload.length, 0);
   console.log('ok actual cross-node fallback serves EXR bytes and HEAD');

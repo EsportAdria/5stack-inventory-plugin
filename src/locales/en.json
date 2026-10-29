@@ -16,6 +16,7 @@
       "synced_partial": "Synced with Steam — {summary}. Inventory too large to read fully.",
       "synced_no_changes": "Synced with Steam — everything was already up to date.",
       "render_upload_failed": "Render made locally, but saving it failed: {error}. Check backend deploy/mount.",
+      "cards_stale": "The 3D models were just updated on the server. Reload the page to see the new cards.",
       "render_not_served": "Render SAVED (backend OK) but /renders/ doesn't serve it back — frontend + backend pods aren't sharing the mount, or a cache is serving a stale 404."
     },
     "admin": {
@@ -53,12 +54,16 @@
           "rename-models": "Mapping models to catalog keys",
           "model-textures": "Compressing model textures",
           "composite-inputs": "Extracting composite inputs",
+          "inputs-2048": "Making 2048 composite inputs",
           "charm-anchors": "Reading charm anchors",
           "sticker-markup": "Reading sticker slots",
+          "sticker-masks": "Extracting sticker masks",
+          "stattrak-art": "Extracting StatTrak art & knife attachments",
           "econ-icons": "Extracting item icons",
           "paint-chain": "Extracting paint chain",
           "sticker-art": "Extracting sticker art",
           "music-audio": "Extracting music kit audio",
+          "precompress": "Precompressing models",
           "stamp": "Recording the build"
         },
         "time_left": "~{duration} left"
@@ -78,6 +83,9 @@
       "seek": "Seek preview",
       "failed": "Preview unavailable",
       "volume": "Preview volume",
+      "preview": "Preview",
+      "full_song": "Full song",
+      "mvp": "MVP",
       "mute": "Mute",
       "unmute": "Unmute"
     },
@@ -134,6 +142,7 @@
       "blink_stop": "showing {which} — stop",
       "blink_start": "Flip between them",
       "weapon_aria": "Weapon pattern",
+      "glove_aria": "Glove pattern",
       "measuring_pct": "Measuring… {pct}%",
       "top": "Top",
       "find": "Find",
