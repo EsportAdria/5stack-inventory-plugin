@@ -109,8 +109,14 @@ const cache = new Map<string, Promise<RawClip | null>>();
  *     pinned the OLD shape under the NEW key, and its inspect played with the
  *     knife frozen while a fresh fetch of the same URL had the tracks. Bump this
  *     only once the data it describes is already on the mount.
+ * 8 — a RE-KEY again, for the C4's own clips (equipment/c4, no reload or
+ *     shot) and the rare inspects (inspect2/inspect3) with the index.json
+ *     that lists them. A scoped `step viewmodel-anims` changes those files
+ *     without changing the extraction stamp, so the version half of the key
+ *     stayed put and browsers kept the rifle-held C4 they had cached. Bumped
+ *     after the step had run (2026-10-21).
  */
-const CLIP_SCHEMA = 7;
+const CLIP_SCHEMA = 8;
 
 /**
  * A URL under the viewmodel asset tree — clips, their sounds, the effect
@@ -137,10 +143,77 @@ export function viewmodelAssetUrl(rel: string): string {
  * holds the gun up and turned, filling the frame, which reads as broken
  * framing rather than as a pose.
  */
-export type ClipAction = "idle" | "inspect" | "draw" | "reload" | "fire";
+export type ClipAction = "idle" | "inspect" | "inspect2" | "inspect3" | "draw" | "reload" | "fire" | "fire2";
+/**
+ * The inspect and its rarer variants, in the order a repeated press steps
+ * through them. `inspect2`/`inspect3` are the game's lookat02/lookat03 — the
+ * Deagle's spin, the AK's, a knife's second trick — and most weapons have
+ * neither; the clip index says which (see viewmodelActions).
+ */
+export const INSPECTS: readonly ClipAction[] = ["inspect", "inspect2", "inspect3"];
 
-function clipUrl(model: string, action: ClipAction): string {
-  return viewmodelAssetUrl(`${encodeURIComponent(model)}.${action}.json`);
+/**
+ * What the game lets you do with an item in hand, where that is LESS than the
+ * clips on the mount say.
+ *
+ * The C4 is the case this exists for. Extractions before it had its own entry
+ * in the folder table gave it the generic rifle's clips (`_default_rifle`), so
+ * the mount holds a reload and a shot for a bomb — the files outlive the
+ * mistake, and a viewer that trusted them offered both. The Zeus is
+ * single-shot: it fires, and recharges rather than reloading.
+ */
+const CANNOT: Record<string, ClipAction[]> = {
+  c4: ["fire", "reload"],
+  taser: ["reload"],
+};
+
+let actionIndex: Promise<(Record<string, Partial<Record<ClipAction, unknown>>> & { _built?: string }) | null> | null = null;
+/**
+ * The clip index, revalidated rather than trusted from cache.
+ *
+ * Every other /anims/ URL is served immutable, keyed on the extraction stamp
+ * and CLIP_SCHEMA — and a scoped `step viewmodel-anims` changes clips without
+ * changing either, so browsers kept the C4's rifle clips until CLIP_SCHEMA was
+ * bumped by hand. The index is small and says when it was written (`_built`),
+ * so it is asked for with `no-cache` (a conditional request, a 304 when
+ * nothing changed) and the clips are keyed on that time.
+ */
+function loadActionIndex() {
+  actionIndex ??= fetch(viewmodelAssetUrl("index.json"), { cache: "no-cache" })
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null)
+    .then((v) => {
+      // Not cached as a permanent no — see loadViewmodelClip.
+      if (!v) actionIndex = null;
+      return v;
+    });
+  return actionIndex;
+}
+/**
+ * The actions this model's clips cover, from the extractor's `index.json`.
+ *
+ * Knives ship no shot and no reload, the Zeus no reload, the C4 neither — and
+ * a button whose press finds no clip does nothing at all, which reads as
+ * broken. Null while the index is unknown (an older mount, a failed fetch):
+ * the caller then offers everything but what CANNOT rules out, as it did
+ * before the index was read.
+ */
+export async function viewmodelActions(model: string): Promise<Set<ClipAction> | null> {
+  const index = await loadActionIndex();
+  const listed = model === "_built" ? undefined : index?.[model];
+  if (!listed) return null;
+  const out = new Set(Object.keys(listed) as ClipAction[]);
+  for (const a of CANNOT[model] ?? []) out.delete(a);
+  return out;
+}
+/** The same rule with nothing fetched — for a button row that has to draw now. */
+export function viewmodelCannot(model: string, action: ClipAction): boolean {
+  return (CANNOT[model] ?? []).includes(action);
+}
+
+function clipUrl(model: string, action: ClipAction, built: string | null): string {
+  const url = viewmodelAssetUrl(`${encodeURIComponent(model)}.${action}.json`);
+  return built ? `${url}&a=${encodeURIComponent(built)}` : url;
 }
 
 /**
@@ -155,7 +228,8 @@ export function loadViewmodelClip(model: string, action: ClipAction = "idle"): P
   const key = `${model}.${action}`;
   const hit = cache.get(key);
   if (hit) return hit;
-  const p = fetch(clipUrl(model, action))
+  const p = loadActionIndex()
+    .then((index) => fetch(clipUrl(model, action, typeof index?._built === "string" ? index._built : null)))
     .then((r) => (r.ok ? (r.json() as Promise<RawClip>) : null))
     .catch(() => null)
     // NO IDLE IS NOT NO FIRST PERSON. Idle is what the mount asks for, so a

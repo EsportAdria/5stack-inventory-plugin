@@ -239,6 +239,53 @@ set -euo pipefail
 # texture channels and csgo_weapon.vfx does not use them raw: Charm | Sasquatch
 # authors its eyes metalness 1 but declares g_vMetalnessRemapRange [0, 0.5], and
 # its roughness channel (max 0.51) is scaled by brightness 1.9 / contrast 0.7.
+# v39 (2026-10-21): LIGHTER ASSETS, same pixels (scripts/lighten-assets.mjs).
+#   inputs-2048  every composite input over 2048px gets a 2048 copy beside it
+#                (`<name>.2048.png`, listed in meta.json as `textures2048`). The
+#                compositor renders at 2048 outside the projected styles and
+#                reads a 4096 input at its 2048 mip anyway, so an HD AK-47 skin
+#                now downloads ~10MB of color/metalness instead of ~35MB. Only the
+#                HD gun bundles have such inputs (90 maps in 35 bundles); measured
+#                composite output within 2 levels, 0% of pixels over 2.
+#   precompress  `<file>.gz` (gzip -9) beside every .glb and .json over 1KB on
+#                /models, for the servers to send instead of the raw file. Nothing
+#                compressed a GLB on the wire before: ak47.glb went out at 3.3MB,
+#                its .gz is 1.1MB. Every .gz is deleted at the START of a run (see
+#                "Precompressed siblings" below), because nginx's gzip_static sends
+#                a .gz without checking it still matches its original.
+# Nothing existing changes: originals stay as they were, so the installed plugin,
+# which shares this mount, keeps loading exactly what it loads today.
+# v38 (2026-10-21): require a readable econ schema before producing
+# schema-dependent assets (a single archive match can be written as the output
+# file itself unless the destination directory exists, leaving pets, gloves and
+# music empty), and keep floating-point paint/position textures as EXR with
+# their real format referenced, where cwebp silently dropped them.
+# v37 (2026-10-20): MVP ANTHEMS (step music-audio). Each kit's
+# roundmvpanthem — the clip the game plays when you are the round's MVP — is
+# decoded next to its menu theme as <folder>.mvp.<ext>, indexed in its own
+# music-mvp.json so music-kits.json and every existing preview are untouched.
+# v36 (2026-10-20): STATTRAK ART (new step stattrak-art -> models/stattrak/ +
+# stattrak-art.json + knife-attachments.json). A knife's kill count is
+# scratched into the blade through an alpha test on the digit atlas's ALPHA,
+# and the module's glTF copy of that atlas comes out RGB-only, so the viewer
+# had to rebuild the cut from the normal map. This decodes the atlas pair
+# straight from the archive with alpha intact. It also dumps every knife's
+# attachments and bone chain (parent bone, origin, angles) — the StatTrak
+# anchors for knives were generated without the parent bone's offset, and this
+# is the ground truth to regenerate them from instead of fitting screenshots.
+# v35 (2026-10-20): charm-shading.json gains `detail` — csgo_weapon's
+# F_DETAIL_TEXTURE over the albedo (mode, blend, scale, rotation, authored
+# offset, masked by the tint mask or not), and the detail texture joins the
+# charm textures the paint chain extracts. Charm | 8 Ball IGL is the reason:
+# the triangle in its window — the one its pattern turns green, yellow… — is
+# this texture, and without it the window was empty glass.
+# v34 (2026-10-20): STICKER MASKS (new step sticker-masks -> models/
+# <key>.stickermask.{hd,legacy}.webp + sticker-masks.json). csgo_weapon's
+# g_tStickerWepInputs, per body: the game draws stickers through its R channel,
+# so whatever is modelled over the sticker band (the C4's LCD module, wires and
+# tape) hides the part of a sticker beneath it. The viewer drew stickers over all
+# of it. The bump also re-bakes every card, which is what puts the masked
+# stickers into the 2D art.
 # v33 (2026-10-15): KNIVES IN FIRST PERSON (step viewmodel-anims only). Each
 # viewmodel clip now carries `prop` — the weapon's OWN skeleton tracks, decoded
 # from the clip's m_secondaryAnimations by tools/nmclip-data.mjs, because the
@@ -290,12 +337,7 @@ set -euo pipefail
 # so resolving the model from the item's image name found nothing for them and
 # they rendered as flat art. The named materials ride the paint chain, so their
 # textures land alongside every other one.
-# v34: require a readable econ schema before producing schema-dependent assets.
-# A single archive match can be written as the output file itself unless the
-# destination directory already exists, leaving pets, gloves and music empty.
-# v35: preserve floating-point paint/position textures as EXR and reference
-# their real format. Passing them to cwebp silently left missing paint inputs.
-EXTRACT_VERSION=35
+EXTRACT_VERSION=39
 
 # Default is the node's CS2 dedicated-server install — the same tree the
 # game-server pods mount, present on every 5stack game node. Its root IS the
@@ -404,7 +446,7 @@ export PROGRESS_FILE
 # previous step, which reads as a hang. (model-textures was added in v9 and did
 # exactly that for one run: several minutes of texture compression with the UI
 # still showing "Mapping models to catalog keys" as the last thing that moved.)
-STEPS=(decompile-models rename-models pet-models model-textures composite-inputs charm-anchors sticker-markup charm-models charm-physics econ-icons paint-chain sticker-art music-audio viewmodel-anims stamp)
+STEPS=(decompile-models rename-models pet-models model-textures composite-inputs inputs-2048 charm-anchors sticker-markup sticker-masks stattrak-art charm-models charm-physics econ-icons paint-chain sticker-art music-audio viewmodel-anims precompress stamp)
 
 # Read-modify-write via python: the file is shared with the embedded python
 # steps, and hand-rolling JSON in shell got the quoting wrong the first time.
@@ -493,6 +535,10 @@ step() { # step "Name" — closes the previous step and opens this one
 #                                          (model-textures is what turns the
 #                                          GLBs' PNGs into webp; it touches no
 #                                          GLB that already references webp)
+#   ONLY_STEPS=inputs-2048    ~0s once made   the 2048 composite-input copies
+#
+# `precompress` runs on every run, scoped or not (add it to SKIP_STEPS to stop
+# it): each run starts by deleting every .gz, so it is what puts them back.
 #
 # Only reach for the paint chain when a NEW TEXTURE has to be extracted; params
 # alone never need it. Two things make scoped runs safe, and both had to be
@@ -554,6 +600,17 @@ else
 fi
 
 mkdir -p "$RAW" "$DEST/knives" "$DEST/extra" "$CLI_DIR"
+
+# ---- Precompressed siblings: gone until the run has finished writing ----------
+# The precompress step (near the end) writes <file>.gz beside the GLBs and JSON,
+# and nginx's gzip_static sends that .gz to every browser WITHOUT checking it
+# still matches its original. Almost every step below rewrites files in place
+# (the GLBs are re-copied, their JSON re-pointed at webp, meta.json and every
+# sidecar re-dumped), so a .gz left standing would serve the previous run's bytes
+# for as long as this run takes, and forever if it dies halfway. Delete them all
+# now; until precompress runs, the servers simply send the originals. This runs
+# on a scoped run too, which is why precompress does as well.
+find "$DEST" -type f -name '*.gz' -delete 2>/dev/null || true
 
 # ---- 1. Fetch Source 2 Viewer CLI (linux-x64) --------------------------------
 CLI="$CLI_DIR/Source2Viewer-CLI"
@@ -742,6 +799,11 @@ declare -A MAP=(
   [weapon_pist_deagle]=deagle
   [weapon_pist_revolver]=revolver
   [weapon_pist_taser]=taser
+  # The C4 is decompiled with every other weapons/models/ dir already; this
+  # entry is what names it c4.glb and feeds MODEL_KEY, so its sticker markup and
+  # charm surfaces are read too. items_game gives the C4 both
+  # weapon_supports_stickers and weapon_supports_keychains.
+  [weapon_c4]=c4
   [weapon_smg_mp9]=mp9
   [weapon_smg_mac10]=mac10
   [weapon_smg_mp7]=mp7
@@ -2043,6 +2105,25 @@ PYEOF
 
 fi
 
+# ---- 3b2. 2048 copies of the large composite inputs --------------------------
+# v39. The HD gun bundles ship color/metalness (and some masks) at 4096, and the
+# compositor renders at 2048 for every style but the projected two — where the
+# GPU then reads the 4096 map at its 2048 mip. This writes that mip once, as
+# <name>.2048.png beside the original, and lists it in meta.json `textures2048`;
+# the client swaps it in only at a cap of 2048 or less. `textures` and every
+# original are untouched, so a client that predates this reads exactly what it
+# always did. Per channel, sRGB-correct for ao/color, RGB under zero alpha kept,
+# 8-bit RGBA PNG (the shape src/rawPng.ts decodes for Safari). Incremental: a
+# copy whose source is unchanged (fingerprinted inside the PNG) is kept, so only
+# the first run, or a CS2 update that changes an input, pays ~2s a texture.
+if step_if "inputs-2048"; then
+  # Not fatal: without the copies every client loads the full-size inputs, which
+  # is what they did before this step existed.
+  if ! node "$(dirname "$0")/lighten-assets.mjs" inputs-2048 --models "$DEST" --step inputs-2048; then
+    echo "!! 2048 composite inputs failed — clients load the full-size inputs."
+  fi
+fi
+
 # ---- 3c. Keychain (charm) anchor points --------------------------------------
 if step_if "charm-anchors"; then
 # Where a charm hangs is baked into the weapon model as an attachment named
@@ -2550,6 +2631,327 @@ PYEOF
 
 fi
 
+# ---- 3d2. Sticker masks -------------------------------------------------------
+if step_if "sticker-masks"; then
+# Where a sticker may SHOW on each weapon body: csgo_weapon's
+# `g_tStickerWepInputs` (csgo_weapon.slang: R = TextureStickerMask, G =
+# TextureStickerCavity, ATI2N), authored in the body's UV0 — the main texture
+# space, NOT the TEXCOORD_1 the sticker anchors live in (measured: the masks'
+# white shapes are the UV0 islands exactly). The game draws stickers through it, so anything modelled
+# on top of the sticker band — the C4's LCD module, wires and tape, a rifle's
+# moving parts — hides the part of a sticker under it. Without it the viewer
+# painted stickers straight over all of that.
+#
+# The weapon GLBs already name it: step 2 keeps each material's vmat params in
+# extras.vmat.TextureParams, so no second pass over the archive's materials is
+# needed — only the textures themselves, decompiled in batches like §3b's.
+# One per BODY (the HD and legacy unwraps differ, and so do their masks), found
+# by the mesh each material is drawn on.
+#
+# Output: <key>.stickermask.hd.webp / .legacy.webp, lossless (cwebp -exact, as
+# model-textures does — the mask is data, and a lossy edge is a sticker cut in
+# the wrong place), and sticker-masks.json { key: { body_hd: file, … } }.
+echo ""
+echo "--- Extracting sticker masks…"
+CLI="$CLI" VPK="$VPK" DEST="$DEST" WORK="$WORK" python3 - <<'PYEOF'
+import json, os, shutil, struct, subprocess
+
+cli, vpk, dest, work = (os.environ[k] for k in ("CLI", "VPK", "DEST", "WORK"))
+raw = os.path.join(work, "raw_stickermask")
+shutil.rmtree(raw, ignore_errors=True)
+os.makedirs(raw, exist_ok=True)
+
+def glb_json(path):
+    with open(path, "rb") as fh:
+        head = fh.read(20)
+        if len(head) < 20 or head[:4] != b"glTF":
+            return None
+        jlen = struct.unpack_from("<I", head, 12)[0]
+        return json.loads(fh.read(jlen))
+
+# key -> { body -> vtex path }
+wanted = {}
+for name in sorted(os.listdir(dest)):
+    if not name.endswith(".glb"):
+        continue
+    try:
+        doc = glb_json(os.path.join(dest, name))
+    except Exception:
+        continue
+    if not doc:
+        continue
+    mats = doc.get("materials") or []
+    mask_of = {}
+    for i, m in enumerate(mats):
+        tp = (((m.get("extras") or {}).get("vmat") or {}).get("TextureParams") or {})
+        v = tp.get("g_tStickerWepInputs")
+        if isinstance(v, str) and v.endswith(".vtex"):
+            mask_of[i] = v
+    if not mask_of:
+        continue
+    bodies = {}
+    for mesh in doc.get("meshes") or []:
+        mname = (mesh.get("name") or "").rsplit(".", 1)[-1]
+        body = "body_legacy" if "legacy" in mname else "body_hd"
+        for prim in mesh.get("primitives") or []:
+            vtex = mask_of.get(prim.get("material"))
+            if vtex:
+                bodies.setdefault(body, vtex)
+    if bodies:
+        wanted[name[: -len(".glb")]] = bodies
+
+paths = sorted({v + "_c" for b in wanted.values() for v in b.values()})
+print(f"--- Sticker masks: {len(paths)} textures across {len(wanted)} models")
+BATCH = 40
+for i in range(0, len(paths), BATCH):
+    subprocess.run([cli, "-i", vpk, "-o", raw, "-d", "-f", ",".join(paths[i:i + BATCH])],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+have_cwebp = shutil.which("cwebp") is not None
+index, missing = {}, []
+for key, bodies in sorted(wanted.items()):
+    for body, vtex in sorted(bodies.items()):
+        stem = os.path.join(raw, vtex[: -len(".vtex")])
+        src = next((stem + e for e in (".png", ".tga", ".tif") if os.path.isfile(stem + e)), None)
+        if not src:
+            missing.append(f"{key}:{body}")
+            continue
+        tag = "legacy" if body == "body_legacy" else "hd"
+        out = f"{key}.stickermask.{tag}." + ("webp" if have_cwebp and src.endswith(".png") else src.rsplit(".", 1)[-1])
+        tgt = os.path.join(dest, out)
+        if out.endswith(".webp"):
+            tmp = tgt + ".tmp.webp"
+            r = subprocess.run(["cwebp", "-exact", "-lossless", "-q", "100", src, "-o", tmp],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            if r.returncode != 0 or not os.path.isfile(tmp):
+                missing.append(f"{key}:{body} (cwebp)")
+                continue
+            os.replace(tmp, tgt)
+        else:
+            shutil.copyfile(src, tgt)
+        index.setdefault(key, {})[body] = out
+
+with open(os.path.join(dest, "sticker-masks.json"), "w") as fh:
+    json.dump(index, fh, indent=1, sort_keys=True)
+print(f"--- Sticker masks written for {len(index)} models")
+if missing:
+    print(f"!!  no decompiled mask for {len(missing)}: {', '.join(missing[:10])}")
+PYEOF
+
+fi
+
+# ---- 3d3. StatTrak art + knife attachments ------------------------------------
+if step_if "stattrak-art"; then
+# Two things the knife's kill count needs that the glTF export loses.
+#
+# 1. THE DIGIT ATLAS WITH ITS ALPHA. stattrak_module_display_knife is
+#    csgo_weapon with F_ALPHA_TEST (reference 0.667): the numerals are
+#    scratched into the blade by cutting the plate down to the colour atlas's
+#    alpha. VRF's glTF writes that atlas RGB-only — flat grey — so the viewer
+#    could only rebuild the cut from the normal map. Decompiling the vtex on its
+#    own keeps the alpha, at the archive's own resolution. The texture names
+#    come from the module GLB's vmat params, so a retouched atlas with a new
+#    content hash is still found.
+#
+# 2. EVERY KNIFE'S ATTACHMENTS AND BONE CHAIN. charm-anchors only keeps models
+#    with a keychain attachment, and knives have none, so their `stattrak` and
+#    `nametag` attachments were never dumped — the StatTrak anchors for knives
+#    were generated without the parent bone's offset and landed half an inch
+#    toward the handle. knife-attachments.json is the ground truth: per vmdl,
+#    each attachment's parent bone / relative origin / relative angles and each
+#    bone's parent / origin / angles, plus the raw text under
+#    attachments/knives/ for re-parsing without another run.
+#
+# Output: stattrak/knife_digits_{color,normal}.webp (lossless, -exact: the
+# alpha IS the data), stattrak-art.json, knife-attachments.json.
+echo ""
+echo "--- Extracting StatTrak art and knife attachments…"
+CLI="$CLI" VPK="$VPK" DEST="$DEST" WORK="$WORK" python3 - <<'PYEOF'
+import json, os, re, shutil, struct, subprocess, zlib
+
+cli, vpk, dest, work = (os.environ[k] for k in ("CLI", "VPK", "DEST", "WORK"))
+raw = os.path.join(work, "raw_stattrak")
+shutil.rmtree(raw, ignore_errors=True)
+os.makedirs(raw, exist_ok=True)
+
+def glb_json(path):
+    with open(path, "rb") as fh:
+        head = fh.read(20)
+        if len(head) < 20 or head[:4] != b"glTF":
+            return None
+        return json.loads(fh.read(struct.unpack_from("<I", head, 12)[0]))
+
+def png_alpha_range(path):
+    """(width, height, min alpha, max alpha) of an 8-bit PNG, or None.
+    Plain zlib — the node has no imaging library. Alpha-less colour types
+    report (w, h, 255, 255)."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    pos, idat, w = 8, [], None
+    while pos + 8 <= len(data):
+        n, kind = struct.unpack_from(">I4s", data, pos)
+        body = data[pos + 8: pos + 8 + n]
+        if kind == b"IHDR":
+            w, h, depth, ctype, _, _, interlace = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            idat.append(body)
+        pos += 12 + n
+    if w is None:
+        return None
+    if depth != 8 or interlace:
+        return (w, h, None, None)
+    bpp = {6: 4, 4: 2}.get(ctype)
+    if not bpp:
+        return (w, h, 255, 255)
+    rows = zlib.decompress(b"".join(idat))
+    stride = w * bpp
+    prev = bytearray(stride)
+    lo, hi = 255, 0
+    for y in range(h):
+        f = rows[y * (stride + 1)]
+        line = bytearray(rows[y * (stride + 1) + 1: (y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if f == 1:
+                line[i] = (line[i] + a) & 255
+            elif f == 2:
+                line[i] = (line[i] + b) & 255
+            elif f == 3:
+                line[i] = (line[i] + ((a + b) >> 1)) & 255
+            elif f == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        alpha = line[bpp - 1::bpp]
+        lo, hi = min(lo, min(alpha)), max(hi, max(alpha))
+        prev = line
+    return (w, h, lo, hi)
+
+have_cwebp = shutil.which("cwebp") is not None
+def publish(src, stem):
+    """Lossless, alpha byte-exact; PNG as-is without cwebp."""
+    os.makedirs(os.path.join(dest, "stattrak"), exist_ok=True)
+    if have_cwebp:
+        rel = f"stattrak/{stem}.webp"
+        tgt = os.path.join(dest, rel)
+        tmp = tgt + ".tmp.webp"
+        r = subprocess.run(["cwebp", "-exact", "-lossless", "-q", "100", src, "-o", tmp],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if r.returncode == 0 and os.path.isfile(tmp):
+            os.replace(tmp, tgt)
+            return rel
+    rel = f"stattrak/{stem}.png"
+    shutil.copyfile(src, os.path.join(dest, rel))
+    return rel
+
+# ---- 1. the knife digit atlas -------------------------------------------------
+art = {}
+module = os.path.join(dest, "knives", "stattrak_module_knife.glb")
+doc = glb_json(module) if os.path.isfile(module) else None
+params = {}
+for m in (doc or {}).get("materials") or []:
+    if (m.get("name") or "").startswith("stattrak_module_display"):
+        params = (((m.get("extras") or {}).get("vmat") or {}).get("TextureParams") or {})
+        break
+want = {k: params.get(p) for k, p in (("color", "g_tColor"), ("normal", "g_tNormal"))}
+want = {k: v for k, v in want.items() if isinstance(v, str) and v.endswith(".vtex")}
+if want:
+    subprocess.run([cli, "-i", vpk, "-o", raw, "-d", "-f", ",".join(v + "_c" for v in want.values())],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+for kind, vtex in sorted(want.items()):
+    stem = os.path.join(raw, vtex[: -len(".vtex")])
+    src = stem + ".png" if os.path.isfile(stem + ".png") else None
+    if not src:
+        print(f"!!  StatTrak art: {vtex} did not decompile to PNG")
+        continue
+    info = png_alpha_range(src)
+    if kind == "color":
+        # Only worth shipping if the alpha actually cuts something: an opaque
+        # atlas would turn the viewer's scratches back into a grey plate, and
+        # its fallback (the cut rebuilt from the normals) is the better answer.
+        if not info or info[2] is None or info[2] > 128 or info[3] < 128:
+            print(f"!!  StatTrak art: {vtex} has no usable alpha {info} — not shipped")
+            continue
+    art[kind] = publish(src, f"knife_digits_{kind}")
+    print(f"--- StatTrak art: {kind} {info[0] if info else '?'}x{info[1] if info else '?'}"
+          f" alpha {info[2] if info else '?'}..{info[3] if info else '?'} -> {art[kind]}")
+with open(os.path.join(dest, "stattrak-art.json"), "w") as fh:
+    json.dump({"knife": art} if art else {}, fh, indent=1, sort_keys=True)
+
+# ---- 2. knife attachments + bone chain ----------------------------------------
+att_raw = os.path.join(raw, "vmdl")
+subprocess.run([cli, "-i", vpk, "-o", att_raw, "-d", "-f", "weapons/models/knife/", "-e", "vmdl_c"],
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+NAME = re.compile(r'\bname\s*=\s*"([^"]*)"')
+VEC = lambda key: re.compile(key + r'\s*=\s*\[([^\]]*)\]')
+PARENT, R_ORIGIN, R_ANGLES = re.compile(r'parent_bone\s*=\s*"([^"]*)"'), VEC("relative_origin"), VEC("relative_angles")
+B_ORIGIN, B_ANGLES = VEC(r'\borigin'), VEC(r'\bangles')
+def floats(m):
+    try:
+        return [float(v) for v in m.group(1).replace(",", " ").split()][:3] if m else None
+    except ValueError:
+        return None
+def parse(text):
+    atts = {}
+    for block in text.split('_class = "Attachment"')[1:]:
+        block = block[: block.find("_class") if "_class" in block else len(block)]
+        name = NAME.search(block)
+        if not name:
+            continue
+        parent = PARENT.search(block)
+        atts[name.group(1)] = {"parent_bone": parent.group(1) if parent else None,
+                               "origin": floats(R_ORIGIN.search(block)),
+                               "angles": floats(R_ANGLES.search(block))}
+    bones, stack, cur = {}, [], None
+    for line in text.split("\n"):
+        if '_class = "Bone"' in line:
+            cur = {"depth": len(line) - len(line.lstrip("\t")), "name": None, "origin": None}
+            continue
+        if cur is None:
+            continue
+        m = NAME.search(line)
+        if m and cur["name"] is None:
+            cur["name"] = m.group(1)
+            continue
+        m = B_ORIGIN.search(line)
+        if m and cur["origin"] is None:
+            cur["origin"] = floats(m)
+            continue
+        m = B_ANGLES.search(line)
+        if m:  # angles closes the bone record, as in charm-anchors
+            while stack and stack[-1]["depth"] >= cur["depth"]:
+                stack.pop()
+            bones[cur["name"]] = {"parent": stack[-1]["name"] if stack else None,
+                                  "origin": cur["origin"], "angles": floats(m)}
+            stack.append(cur)
+            cur = None
+    return atts, bones
+knives, dumped = {}, 0
+os.makedirs(os.path.join(dest, "attachments", "knives"), exist_ok=True)
+for root, _dirs, files in os.walk(att_raw):
+    for f in sorted(files):
+        if not f.endswith(".vmdl"):
+            continue
+        path = os.path.join(root, f)
+        text = open(path, encoding="utf-8", errors="replace").read()
+        atts, bones = parse(text)
+        if "stattrak" not in atts and "nametag" not in atts:
+            continue
+        stem = f[: -len(".vmdl")]
+        knives[stem] = {"vmdl": os.path.relpath(path, att_raw), "attachments": atts, "bones": bones}
+        shutil.copyfile(path, os.path.join(dest, "attachments", "knives", f))
+        dumped += 1
+with open(os.path.join(dest, "knife-attachments.json"), "w") as fh:
+    json.dump(knives, fh, indent=1, sort_keys=True)
+print(f"--- Knife attachments for {dumped} models"
+      + ("" if dumped else " — NONE: -d emitted no text .vmdl under weapons/models/knife/"))
+PYEOF
+
+fi
+
 # ---- 3e. Charm model + material map ------------------------------------------
 if step_if "charm-models"; then
 # Which MODEL and which MATERIAL each charm is, straight from the econ schema.
@@ -2980,6 +3382,31 @@ for block in BLOCKS:
         # only at mask=1 — so the flag rides along and the renderer unfolds.
         if num(block, "g_bMaskRoughnessAdjustmentsByTintMask", "m_nValue"):
             entry["maskRoughness"] = True
+    # ---- A DETAIL texture over the albedo ------------------------------------
+    #
+    # csgo_weapon.slang: `Feature( F_DETAIL_TEXTURE, 0..1 (0="Multiply",
+    # 1="Replace") )`, `g_tDetail` (sRGB), placed by its own scale / rotation /
+    # offset and, with g_bMaskDetailTextureByTintMask, only where the tint mask
+    # is. Charm | 8 Ball IGL is the reason: the triangle floating in its window —
+    # the one the pattern turns green, yellow… — is this texture, Replace mode,
+    # inside the mask. Without it the window was empty glass.
+    #
+    # The offset is shipped AUTHORED; the shader's Expression folds scale and
+    # rotation into it, and the renderer does that fold so the two stay one rule.
+    # Only a real texture counts: every csgo_weapon material names one, and the
+    # default is a white multiply that changes nothing.
+    det = re.search(r'm_name = "g_tDetail"\s*\n\s*m_pValue = resource:"([^"]+)"', block)
+    if det and "default_detail" not in det.group(1):
+        entry["detail"] = {
+            "tex": f"/textures/{tex_out_name(det.group(1))}",
+            "mode": int(num(block, "F_DETAIL_TEXTURE", "m_nValue") or 0),
+            "blend": num(block, "g_fDetailBlendFactor", "m_flValue") if num(block, "g_fDetailBlendFactor", "m_flValue") is not None else 1.0,
+            "scale": vec(block, "g_vDetailTexCoordScale", 2) or [1.0, 1.0],
+            "offset": vec(block, "g_vDetailTexCoordOffset", 2) or [0.0, 0.0],
+            "rotation": num(block, "g_flDetailTexCoordRotation", "m_flValue") or 0.0,
+            "maskByTint": bool(num(block, "g_bMaskDetailTextureByTintMask", "m_nValue")),
+        }
+        mask_textures[det.group(1) + "_c"] = tex_out_name(det.group(1))
     remap = re.search(r'm_name = "g_vMetalnessRemapRange"\s*\n\s*m_value = \[ ([^\]]+) \]', block)
     if remap:
         lo, hi = [float(x) for x in remap.group(1).split(",")[:2]]
@@ -4811,9 +5238,9 @@ def extract_textures(todo, step, close=False):
         tmp = dst + ".tmp"
         try:
             if is_exr(src):
-                # Position maps contain signed floating-point coordinates.
-                # Preserve bytes exactly; cwebp cannot decode EXR, and an
-                # 8-bit intermediary would lose the values the shader samples.
+                # Preserve floating-point data exactly; cwebp cannot decode
+                # EXR, and an 8-bit intermediary would lose precision or clamp
+                # values outside its range.
                 shutil.copyfile(src, tmp)
             elif not have_cwebp:
                 # Copy the PNG bytes under the .webp name. Ugly, but it is what
@@ -5173,6 +5600,37 @@ with open(os.path.join(dest, "music-kits.json"), "w") as fh:
 print(f"--- Music kits: {len(written)}/{len(folders)} themes -> {dest} ({len(index)} kits mapped)")
 if missing:
     print(f"!!! {len(missing)} kits have no mainmenu track in this build, e.g. {missing[:4]}")
+
+# ---- MVP anthems ---------------------------------------------------------------
+# The clip played when you are the round's MVP, one per kit beside the menu
+# theme. A separate pass, after the themes are safely written: `-f` takes exact
+# paths, and a name that does not exist must not be able to cost a kit its
+# theme. Named roundmvpanthem_01 in every kit folder seen; plain roundmvpanthem
+# is tried for whatever the first pass missed.
+mvp_written = {}
+for cand in ("roundmvpanthem_01", "roundmvpanthem"):
+    todo = [name for name in folders if name not in mvp_written]
+    if not todo:
+        break
+    shutil.rmtree(raw, ignore_errors=True)
+    os.makedirs(raw, exist_ok=True)
+    paths = [f"sounds/music/{name}/{cand}.vsnd_c" for name in todo]
+    stride = max(1, (len(paths) + workers - 1) // workers)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(grab, [paths[i:i + stride] for i in range(0, len(paths), stride)]))
+    for name in todo:
+        stem = os.path.join(raw, "sounds", "music", name, cand)
+        hit = next(iter(sorted(glob.glob(glob.escape(stem) + ".*"))), None)
+        if hit is None:
+            continue
+        out = name + ".mvp" + os.path.splitext(hit)[1].lower()
+        shutil.move(hit, os.path.join(dest, out))
+        mvp_written[name] = out
+shutil.rmtree(raw, ignore_errors=True)
+mvp_index = {idx: mvp_written[name] for idx, name in kits.items() if name in mvp_written}
+with open(os.path.join(dest, "music-mvp.json"), "w") as fh:
+    json.dump(mvp_index, fh, indent=1, sort_keys=True)
+print(f"--- Music kits: {len(mvp_written)}/{len(folders)} MVP anthems ({len(mvp_index)} kits mapped)")
 PYEOF
 
 # ---- swap staging into place -------------------------------------------------
@@ -5232,6 +5690,28 @@ else
   echo "!! Viewmodel extraction failed — first person will have no animations on this instance."
 fi
 
+fi
+
+# ---- 5d. Precompressed siblings ----------------------------------------------
+# v39. <file>.gz (gzip -9) beside every .glb and .json over 1KB on /models, which
+# nginx (gzip_static) and the Node servers send in place of the raw file when the
+# browser accepts gzip. GLBs went out uncompressed before this: ak47.glb is 3.3MB
+# raw and 1.1MB here; sticker-markup.json 559KB -> 24KB. PNG/WebP/EXR and audio
+# are never precompressed (already compressed, or range-streamed).
+#
+# LAST, after every step that writes a GLB or a JSON, because a .gz is only right
+# for as long as its original does not change — and the run deleted every .gz up
+# front for exactly that reason. So unlike the other steps this one runs on a
+# SCOPED run too (ONLY_STEPS does not skip it; SKIP_STEPS=precompress does, and
+# then the mount is simply served uncompressed).
+if [[ ",${SKIP_STEPS:-}," != *",precompress,"* ]]; then
+  step "precompress"
+  if ! node "$(dirname "$0")/lighten-assets.mjs" gzip --models "$DEST" --step precompress; then
+    echo "!! Precompression failed — the servers send the uncompressed files."
+  fi
+else
+  echo "--- [precompress] SKIPPED (SKIP_STEPS)"
+  prog "precompress" done
 fi
 
 # ---- 6. Stamp the pipeline version -------------------------------------------

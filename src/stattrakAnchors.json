@@ -111,6 +111,7 @@
   }
  },
  "bayonet": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -89.90934,
@@ -502,6 +503,7 @@
   }
  },
  "knife": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -89.473244,
@@ -522,6 +524,7 @@
   "knife": true
  },
  "knife_butterfly": {
+  "bone": "blade",
   "hd": {
    "angles": [
     88.468636,
@@ -529,19 +532,20 @@
     -165.276718
    ],
    "pos": [
-    0.001473,
-    0.105559,
-    0.013528
+    0.000916,
+    0.144398,
+    0.010041
    ],
    "src": [
-    0.53259,
-    0.057988,
-    4.155856
+    0.395322,
+    0.03606,
+    5.684964
    ]
   },
   "knife": true
  },
  "knife_canis": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -82.656013,
@@ -562,6 +566,7 @@
   "knife": true
  },
  "knife_cord": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -90.0,
@@ -569,7 +574,7 @@
     0.0
    ],
    "pos": [
-    -0.001266,
+    -0.001265,
     0.169963,
     0.009228
    ],
@@ -582,6 +587,7 @@
   "knife": true
  },
  "knife_css": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -88.106789,
@@ -602,6 +608,7 @@
   "knife": true
  },
  "knife_falchion": {
+  "bone": "blade",
   "hd": {
    "angles": [
     -77.894562,
@@ -610,18 +617,19 @@
    ],
    "pos": [
     -0.002779,
-    0.079571,
-    0.023888
+    0.109333,
+    0.029417
    ],
    "src": [
-    0.940475,
+    1.158135,
     -0.109412,
-    3.132717
+    4.304467
    ]
   },
   "knife": true
  },
  "knife_flip": {
+  "bone": "blade",
   "hd": {
    "angles": [
     -81.893707,
@@ -630,18 +638,19 @@
    ],
    "pos": [
     -0.001315,
-    0.116041,
-    0.000952
+    0.142104,
+    0.005248
    ],
    "src": [
-    0.037492,
+    0.206607,
     -0.051754,
-    4.568531
+    5.594657
    ]
   },
   "knife": true
  },
  "knife_gut": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -87.949776,
@@ -662,6 +671,7 @@
   "knife": true
  },
  "knife_gypsy_jackknife": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -80.815872,
@@ -682,6 +692,7 @@
   "knife": true
  },
  "knife_karambit": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -54.106815,
@@ -702,6 +713,7 @@
   "knife": true
  },
  "knife_kukri": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -66.776657,
@@ -722,6 +734,7 @@
   "knife": true
  },
  "knife_m9_bayonet": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -89.30677,
@@ -742,6 +755,7 @@
   "knife": true
  },
  "knife_outdoor": {
+  "bone": "blade",
   "hd": {
    "angles": [
     -87.435852,
@@ -750,18 +764,19 @@
    ],
    "pos": [
     -0.003861,
-    0.089181,
-    -0.004132
+    0.117041,
+    0.00091
    ],
    "src": [
-    -0.162668,
+    0.035843,
     -0.151998,
-    3.511081
+    4.607921
    ]
   },
   "knife": true
  },
  "knife_push": {
+  "bone": "weapon_r",
   "hd": {
    "angles": [
     0.464768,
@@ -770,18 +785,19 @@
    ],
    "pos": [
     -0.003995,
-    -0.000905,
-    0.026421
+    0.039121,
+    0.000915
    ],
    "src": [
     1.040209,
     -0.157276,
-    -0.035644
+    0.464356
    ]
   },
   "knife": true
  },
  "knife_skeleton": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -83.676498,
@@ -802,6 +818,7 @@
   "knife": true
  },
  "knife_stiletto": {
+  "bone": "blade",
   "hd": {
    "angles": [
     -90.0,
@@ -810,18 +827,19 @@
    ],
    "pos": [
     -0.001335,
-    0.089586,
-    0.002879
+    0.117065,
+    0.007285
    ],
    "src": [
-    0.113348,
+    0.28682,
     -0.052556,
-    3.527021
+    4.60884
    ]
   },
   "knife": true
  },
  "knife_survival_bowie": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -89.980209,
@@ -842,6 +860,7 @@
   "knife": true
  },
  "knife_t": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -89.980209,
@@ -862,6 +881,7 @@
   "knife": true
  },
  "knife_tactical": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -85.1735,
@@ -882,6 +902,7 @@
   "knife": true
  },
  "knife_ursus": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -87.629082,
@@ -902,6 +923,7 @@
   "knife": true
  },
  "knife_widowmaker": {
+  "bone": "weapon_offset",
   "hd": {
    "angles": [
     -45.271873,

@@ -21,6 +21,7 @@ import ItemBadges from "./ItemBadges.vue";
 import SlotStatus from "./SlotStatus.vue";
 import { approxNote, PRICE_WINDOW_LABEL } from "../api";
 import { wearTier } from "../itemVisuals";
+import { hoverPrefetch } from "../prefetch";
 
 const props = withDefaults(
   defineProps<{
@@ -75,8 +76,11 @@ const props = withDefaults(
     /** Which market the prices came from, for the "why is this blank" caption.
      *  A name, not a lookup: the tile has no business knowing the settings. */
     priceSource?: string;
+    /** Draw the music kit player's own volume control. Off in the loadout
+     *  sheet, which has one volume control on its toolbar for the whole grid. */
+    musicVolume?: boolean;
   }>(),
-  { active: false, selected: false, disabled: false, stripWeaponName: false, showHeader: false, hideActions: false, row: false, showPrice: false, pricePending: false, priceSource: "the price feed" },
+  { active: false, selected: false, disabled: false, stripWeaponName: false, showHeader: false, hideActions: false, row: false, showPrice: false, pricePending: false, priceSource: "the price feed", musicVolume: true },
 );
 
 const tr = inject<(k: string, f: string, n?: Record<string, unknown>) => string>("tr", (_k, f) => f);
@@ -147,6 +151,11 @@ function onClickCapture(e: MouseEvent) {
   e.preventDefault();
 }
 
+// A pointer resting on the tile is the best early sign that its 3D view is
+// about to be opened, so start fetching what that needs. Not where the tile has
+// no way to open one (bulk select, read-only). See src/prefetch.ts.
+const warm = hoverPrefetch(() => (props.hideActions || props.disabled ? null : props.inst));
+
 // Bake status comes from App's single render pipeline (same provide as ItemArt).
 const art = inject<{
   renderingIds: { value: Set<number> };
@@ -193,6 +202,10 @@ const audioSrc = computed(() => props.inst.item?.audio ?? null);
     @pointermove="onPressMove"
     @pointerup="cancelPress"
     @pointercancel="cancelPress"
+    @pointerenter="warm.enter"
+    @pointerleave="warm.leave"
+    @focus="warm.enter"
+    @blur="warm.leave"
     @click.capture="onClickCapture"
   >
     <span class="pointer-events-none absolute inset-0" :style="glowStyle(inst.item?.rarity, 0.22)"></span>
@@ -321,7 +334,7 @@ const audioSrc = computed(() => props.inst.item?.audio ?? null);
     <!-- Where the wear bar would be. Same reasoning as the row above: a kit has
          no float, so this takes nothing from the card — and it is the only thing
          on it that says what the kit actually sounds like. -->
-    <MusicPlayer v-if="audioSrc" :src="audioSrc" class="relative z-[2] mt-2" />
+    <MusicPlayer v-if="audioSrc" :src="audioSrc" :volume="musicVolume" class="relative z-[2] mt-2" />
     <WearBar v-else :item="inst.item" :wear="inst.wear" :seed="inst.seed" class="relative z-[2] mt-2" />
     </template>
   </button>

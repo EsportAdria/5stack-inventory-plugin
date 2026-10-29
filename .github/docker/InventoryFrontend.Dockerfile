@@ -1,4 +1,5 @@
-FROM node:24-alpine AS build
+# Same Node as Dockerfile.frontend (upstream #56 pins 24.22.1), with npm ci from the lockfile.
+FROM node:24.22.1-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci

@@ -18,6 +18,7 @@ const API_BASE = resolveApiBase();
 export const API_ORIGIN = API_BASE;
 
 import { WEAR_STOPS } from "./itemVisuals";
+import { postCard } from "./cardEncode";
 
 export type Team = "CT" | "T";
 
@@ -95,10 +96,17 @@ export interface Skin {
   collection?: string;
   /** Artwork identity shared by every colour variant — the STACK key. */
   design?: number;
+  /** KNIVES and GLOVES only: the bare model the finish is painted onto
+   *  ("Butterfly Knife"), with its own icon — what the craft sheet sections by. */
+  baseId?: number;
+  baseName?: string;
+  baseImage?: string | null;
   /** That variant's colourway ("Cash Green"). */
   tintName?: string;
   /** MUSIC KITS only: the kit's menu theme, ready to play. See `CatalogItem`. */
   audio?: string | null;
+  /** MUSIC KITS only: the round-MVP anthem, the same way. */
+  mvpAudio?: string | null;
   /** PETS only: how many alternate looks the breed has (0 for the egg and the
    *  chick). Style 1..styleCount; unset is the stock look. */
   styleCount?: number;
@@ -137,6 +145,13 @@ export interface Catalog {
    *  the same host that served this API. Non-empty when the operator has opted
    *  into the shared 5stack CDN. */
   assetOrigin?: string;
+  /** The lighting rig this server's cards are baked under (a ViewerEnvironment
+   *  key). Absent = the client's canonical rig. A server only sets it when its
+   *  card store is its own — see the backend's /api/catalog. */
+  bakeEnvironment?: string;
+  /** The image formats the card uploads take ("webp", "png"). Absent on a
+   *  backend from before WebP cards, which takes PNGs only. See cardEncode.ts. */
+  cardFormats?: string[];
 }
 
 export interface CatalogItem {
@@ -170,8 +185,20 @@ export interface CatalogItem {
    * transport is never rendered against a track that cannot load.
    */
   audio?: string | null;
+  /** MUSIC KITS only: the round-MVP anthem, the same way (pipeline v37). */
+  mvpAudio?: string | null;
   /** The egg is the one pet that cannot be named. */
   hasNameTag?: boolean;
+  /** Per-item facts the resolver sends for every item — see `Skin.hasWear`.
+   *  Absent means "no per-item answer, use the type-level one". */
+  hasWear?: boolean;
+  hasSeed?: boolean;
+  hasStatTrak?: boolean;
+  /** The finish's real float range — see `Skin.wearMin`. */
+  wearMin?: number | null;
+  wearMax?: number | null;
+  seedMin?: number | null;
+  seedMax?: number | null;
   /** PETS only: how many alternate looks the breed has (0 for the egg and the
    *  chick). Style 1..styleCount; unset is the stock look. */
   styleCount?: number;
@@ -243,6 +270,8 @@ export interface InventoryItem {
   wear: number | null;
   seed: number | null;
   stattrak: boolean;
+  /** See RenderKeyed.card_look — the stickers/charm part of the card's key. */
+  card_look?: string | null;
   /** Kills recorded on the module. 0 when the item isn't StatTrak. Drives the
    *  3D digit display only — 2D cards render a blank display on purpose. */
   stattrak_count: number;
@@ -347,7 +376,18 @@ function applyCatalogRuntime(c: Partial<Catalog>) {
   // Empty string is meaningful — "serve from this host" — so only a non-empty
   // value overrides the default.
   if (c.assetOrigin) assetOrigin = c.assetOrigin;
+  if (typeof c.bakeEnvironment === "string" && c.bakeEnvironment) bakeEnvironment = c.bakeEnvironment;
+  if (Array.isArray(c.cardFormats)) cardsTakeWebp = c.cardFormats.includes("webp");
 }
+/** Whether this backend's card uploads take WebP (`Catalog.cardFormats`).
+ *  False until the catalog says so, so an older backend only ever gets PNGs. */
+let cardsTakeWebp = false;
+/**
+ * The rig the SERVER bakes its cards under, when it names one — see
+ * `Catalog.bakeEnvironment`. Null means the client's own canonical rig.
+ */
+let bakeEnvironment: string | null = null;
+export const getBakeEnvironment = () => bakeEnvironment;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}/api${path}`, {
@@ -417,6 +457,12 @@ export const fetchCatalog = () => request<Catalog>("/catalog");
 // and 4000. Keying on the count would re-bake every card on every kill.
 // stattrak is REQUIRED, not optional: an omitted flag silently builds a key
 // that disagrees with the one the writer used, and the card 404s forever.
+//
+// The `.png` at the end is part of the card's NAME, not a promise about its
+// bytes: a current backend stores most cards as WebP under the same stem and
+// answers this URL with whichever it has, under the right Content-Type
+// (backend/src/cardStore.ts). Keeping the name is what lets cards stored before
+// WebP, old clients and old backends all keep working with one request a card.
 let renderVersion = 0;
 type RenderKeyed = {
   id: number;
@@ -427,10 +473,15 @@ type RenderKeyed = {
    *  renderKeyForRow. */
   style?: number | null;
   upgrade_level?: number | null;
+  /** The server's fingerprint of the stickers and charm a card draws (cardLook
+   *  in the backend), so an edit to them lands on a new card. Empty or absent
+   *  when nothing is attached, and on a backend older than the field. */
+  card_look?: string | null;
 };
 export const renderKeyFor = (i: RenderKeyed) =>
   `inst-${i.id}-${Number(i.wear ?? 0).toFixed(4)}-${Number(i.seed ?? 0)}${i.stattrak ? "-st" : ""}` +
-  `${i.style != null ? `-c${i.style}` : ""}${i.upgrade_level != null ? `-g${i.upgrade_level}` : ""}-v${renderVersion}.png`;
+  `${i.style != null ? `-c${i.style}` : ""}${i.upgrade_level != null ? `-g${i.upgrade_level}` : ""}` +
+  `${i.card_look ? `-l${i.card_look}` : ""}-v${renderVersion}.png`;
 // Served via /api (canonical): that ingress path provably reaches the backend
 // pod that stores the files — immune to stale nginx images, CDN-cached 404s,
 // and hostPath node mismatches. Plain <img> tags send session cookies, so the
@@ -443,31 +494,37 @@ export const renderUrlFor = (i: RenderKeyed) =>
  * instance's card; must match catalogRenderKey there.
  */
 export const catalogRenderUrl = (itemId: number) => `${API_ORIGIN}/api/renders/cat-${itemId}-v${renderVersion}.png`;
+// Both card uploads take the snapshot's PNG and send it as a WebP where the
+// server and the browser allow (postCard in cardEncode.ts); the key and every
+// URL above stay the same either way.
+/** The version a card was baked for, for the server to check against its own
+ *  (staleCardVersion in main.ts). Nothing until the catalog has said: 0 is
+ *  "not loaded yet" here, and would read as stale against any extraction. */
+const bakedFor = () => (renderVersion ? `?v=${renderVersion}` : "");
 export async function uploadCatalogRender(itemId: number, blob: Blob): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/api/render/catalog/${itemId}`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: blob,
-    });
+    const res = await postCard(`${API_BASE}/api/render/catalog/${itemId}${bakedFor()}`, blob, cardsTakeWebp);
     return res.ok;
   } catch {
     return false;
   }
 }
-export async function uploadRender(instanceId: number, blob: Blob): Promise<{ ok: boolean; error?: string }> {
+/**
+ * `stale`: the server refused the card because an extraction finished after
+ * this tab loaded its catalog, so the card was baked from the previous assets
+ * under the previous version's name. Only a reload fixes that.
+ */
+export async function uploadRender(
+  instanceId: number,
+  blob: Blob,
+): Promise<{ ok: boolean; error?: string; stale?: boolean }> {
   try {
-    const res = await fetch(`${API_BASE}/api/render/${instanceId}`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: blob,
-    });
+    const res = await postCard(`${API_BASE}/api/render/${instanceId}${bakedFor()}`, blob, cardsTakeWebp);
     if (res.ok) return { ok: true };
     let error = `HTTP ${res.status}`;
     try {
       const data = (await res.json()) as { error?: string };
+      if (res.status === 409 && data?.error === "stale") return { ok: false, stale: true };
       if (data?.error) error = `${error} — ${data.error}`;
     } catch { /* non-JSON */ }
     return { ok: false, error };
@@ -650,6 +707,9 @@ export interface StickerGeometry {
    *  extracted before v23 — read as "we have no authored answer", not as "this
    *  weapon takes no charm". */
   charmQuads: CharmQuad[];
+  /** Where a sticker may SHOW, per body: the weapon's sticker mask, as a bare
+   *  filename under /models. Empty on a mount extracted before v34. */
+  masks: Partial<Record<"body_hd" | "body_legacy", string>>;
   /** Anchors the HD body declares. 0 when the mount has no markup for the model
    *  — read that as "unknown", not as "this weapon takes no stickers". */
   anchorCount: number;
@@ -667,13 +727,14 @@ export function fetchStickerGeometry(model: string): Promise<StickerGeometry> {
         bounds: r.bounds ?? null,
         slots: r.slots ?? [],
         charmQuads: Array.isArray(r.charmQuads) ? r.charmQuads : [],
+        masks: r.masks && typeof r.masks === "object" ? r.masks : {},
         // Counted server-side from the same slots, so a client that only wants
         // the number does not re-derive it — and a mount whose markup regressed
         // shows up as a zero here rather than as a mispositioned sticker.
         anchorCount: r.anchorCount ?? 0,
         anchorCountLegacy: r.anchorCountLegacy ?? 0,
       }))
-      .catch(() => ({ bounds: null, slots: [], charmQuads: [], anchorCount: 0, anchorCountLegacy: 0 }));
+      .catch(() => ({ bounds: null, slots: [], charmQuads: [], masks: {}, anchorCount: 0, anchorCountLegacy: 0 }));
     stickerGeomCache.set(model, cached);
   }
   return cached;
@@ -918,6 +979,10 @@ export const fetchSteamSync = () =>
 
 // Admin: cached-asset stats + clearing (renders / paints on the mount).
 export type DirStat = { files: number; bytes: number };
+/** A breakdown part. `sentBytes`: what its files cost to send, counting each
+ *  one that has a precompressed `.gz` copy at that copy's size (absent when
+ *  none do, and on backends from before extraction v39). */
+export type PartStat = DirStat & { sentBytes?: number };
 /**
  * Which slice of a mount a `parts` entry describes. Every one of these is a
  * subdivision of `models` or `paints` above — the totals stay authoritative, so
@@ -931,6 +996,8 @@ export type CachePart =
   | "compositeInputs" // <weapon>.inputs[.hd] — the paint compositor's sources
   | "modelTextures" // the flat texture pool the GLBs reference
   | "modelMeta" // anchors, sticker markup, the version stamp
+  | "inputs2048" // the 2048 copies of the largest composite inputs (v39)
+  | "compressedCopies" // the .gz copies the servers send instead (v39)
   | "paintMaterials" // the finish JSON
   | "paintTextures"; // everything the finish JSON points at
 
@@ -944,7 +1011,7 @@ export type CacheStats = {
    *  can be surprised by; absent on a mount extracted before v28. */
   music?: DirStat;
   /** Per-kind breakdown of `models` and `paints`. Absent on older backends. */
-  parts?: Partial<Record<CachePart, DirStat>>;
+  parts?: Partial<Record<CachePart, PartStat>>;
 };
 export const fetchCacheStats = () => request<CacheStats>("/admin/cache");
 

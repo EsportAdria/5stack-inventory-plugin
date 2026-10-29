@@ -2,14 +2,18 @@ name: Inventory candidate images
 
 on:
   push:
+    # The fork deploys from main. Upstream's ci workflow (same file) pushes
+    # :latest and prunes old package versions, which would delete digests the
+    # panel still runs, so the fork keeps this one: one image per commit,
+    # tagged by sha, nothing deleted.
     branches:
-      - "test/inventory-recovery-20261017"
-      - "test/inventory-memory-20261018"
-      - "test/inventory-steam-egress-20261029"
+      - "main"
+      - "sync/upstream-main-*"
+      - "test/inventory-*"
   workflow_dispatch:
 
 concurrency:
-  group: inventory-backend-candidate
+  group: inventory-backend-candidate-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:

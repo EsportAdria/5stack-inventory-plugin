@@ -5,7 +5,7 @@ import { useI18n } from "./composables/useI18n";
 import {
   Loader2, Search, LayoutGrid, Crosshair,
   Package, Hammer, Trash2, Copy, RotateCcw, Sparkles, Replace, RefreshCw, Pencil, Plus, X, Settings, Box, Clock, CircleDollarSign,
-  Image as ImageIcon, Check, ExternalLink, SlidersHorizontal, ChevronUp, ChevronDown, ChevronLeft, Palette, Link2,
+  Image as ImageIcon, Check, ExternalLink, SlidersHorizontal, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Palette, Link2,
   Layers,
 } from "lucide-vue-next";
 import {
@@ -93,10 +93,12 @@ import {
 // player never reaches. Async so they arrive with the route.
 const AdminConsole = defineAsyncComponent(() => import("./components/AdminConsole.vue"));
 import { activeFlags, flagValue, flagsVersion } from "./devFlags";
-import Armory from "./components/Armory.vue";
+// The catalog browser (its own screen) and the sticker/charm picker (an
+// overlay) are never on screen at load either: async, ~39kB off the boot chunk.
+const Armory = defineAsyncComponent(() => import("./components/Armory.vue"));
 import InventoryScreen from "./components/InventoryScreen.vue";
 import LoadoutGrid from "./components/LoadoutGrid.vue";
-import AttachmentPicker from "./components/AttachmentPicker.vue";
+const AttachmentPicker = defineAsyncComponent(() => import("./components/AttachmentPicker.vue"));
 import ShareMenu from "./components/ShareMenu.vue";
 import Tooltip from "./components/Tooltip.vue";
 import { MDEBUG, mdebug, setMdebugAmbient, traceLayer } from "./mdebug";
@@ -106,18 +108,25 @@ import SlotStatus from "./components/SlotStatus.vue";
 import WearBar from "./components/WearBar.vue";
 import ItemTile from "./components/ItemTile.vue";
 import MusicPlayer from "./components/MusicPlayer.vue";
+import MusicVolume from "./components/MusicVolume.vue";
 import TileActions from "./components/TileActions.vue";
 import FilterDropdown from "./components/FilterDropdown.vue";
 import InfiniteSentinel from "./components/InfiniteSentinel.vue";
 import SortDirection from "./components/SortDirection.vue";
-import PatternRail from "./components/PatternRail.vue";
+// The pattern rails and the spec/pet panels are async for the same reason as
+// AdminConsole: they import the CPU side of the 3D pipeline (the pattern scan's
+// compositors, charm liquid and material, pet material and pose), ~100kB that
+// the grid and the loadout never render. They only show in the item view and
+// the editor, which open a 3D viewer anyway, so they arrive with its chunks.
+const PatternRail = defineAsyncComponent(() => import("./components/PatternRail.vue"));
 import PriceTag from "./components/PriceTag.vue";
-import ItemSpecs from "./components/ItemSpecs.vue";
-import PetControls from "./components/PetControls.vue";
+const ItemSpecs = defineAsyncComponent(() => import("./components/ItemSpecs.vue"));
+const PetControls = defineAsyncComponent(() => import("./components/PetControls.vue"));
+const AgentControls = defineAsyncComponent(() => import("./components/AgentControls.vue"));
 import TraitBars, { type TraitRow } from "./components/TraitBars.vue";
 import { DEFAULT_PET_CLIP, loadPetClipIndex, petWanderPool } from "./petAnim";
 import ItemBadges from "./components/ItemBadges.vue";
-import PatternScoreRail from "./components/PatternScoreRail.vue";
+const PatternScoreRail = defineAsyncComponent(() => import("./components/PatternScoreRail.vue"));
 import { SCAN_READ_SIZE } from "./patternScan";
 import { useRenderWindow, WINDOW_FIRST } from "./composables/useRenderWindow";
 import ViewerControls from "./components/ViewerControls.vue";
@@ -150,22 +159,26 @@ import { useSlotLongPress } from "./composables/useSlotLongPress";
 import { useAppHeight } from "./composables/useAppHeight";
 import { useBuildCheck } from "./composables/useBuildCheck";
 import { useViewerMount } from "./composables/useViewerMount";
-import type { ClipAction } from "./viewmodelClip";
+import { viewmodelActions, viewmodelCannot, type ClipAction } from "./viewmodelClip";
 import { useViewerStage, type StageIcon, type StageKey } from "./composables/useViewerStage";
 import { useDebouncedSearch } from "./composables/useDebouncedSearch";
 import { useInventoryView } from "./composables/useInventoryView";
 import { useAttachmentPicker, type PickerRow } from "./composables/useAttachmentPicker";
 import { usePersistedBool, usePersistedEnum, usePersistedNumber } from "./composables/usePersistedRef";
-import { accentSoft, ART_FADE_B, attachmentsOf, canInspect, CARD_ART, CARD_CHROME_PX, glowStyle, hasScratch, hasSeed, hasWear, isCustomizable, isReadOnly, itemName, RARITY_META, rarityName, rarityRank, selRing, STEAM_BLUE, stripName, wearTier, wearPositionInTier } from "./itemVisuals";
+import { accentSoft, ART_FADE_B, attachmentsOf, canInspect, CARD_ART, CARD_CHROME_PX, glowStyle, hasScratch, hasSeed, hasWear, isCustomizable, isReadOnly, itemName, RARITY_META, rarityName, rarityRank, selRing, STEAM_BLUE, stripName, weaponName, wearTier, wearPositionInTier } from "./itemVisuals";
 import { stackByDesign, TINT_SUFFIX } from "./decks";
 import { loadPaintDef, seedMovesPattern, type PaintDef } from "./paintComposite";
 import { formatGunTrait, gunPlacement, gunPlacementTable, gunPlacementTraits } from "./gunPattern";
+import { gloveSeedMoves, loadGloveModernDef, type GloveModernDef } from "./gloveCompositeModern";
+import { gloveLegacySeedMoves, loadGlovePaintDef } from "./gloveComposite";
+import { glovePlacementAt, glovePlacementTable, glovePlacementTraits } from "./glovePattern";
 import { isCompact, isCoarse, reducedMotion } from "./responsive";
 import { revealInScroller, scrollFade, scrollPanelToTop } from "./dom";
 import { hasModel, hasModelSync } from "./modelAvailability";
 import { INCOMPLETE } from "./viewerSentinel";
-import { prefetchViewer3d, snapshotModel, viewersIdle, viewerStats } from "./viewer3dLazy";
-import type { CameraState, ViewerHandle, ViewerKind, StickerPlacement, CharmPlacement } from "./viewer3d";
+import { snapshotModel, viewersIdle, viewerStats } from "./viewer3dLazy";
+import { prefetchEquipped, prefetchView } from "./prefetch";
+import type { AgentMotion, CameraState, ViewerHandle, ViewerKind, StickerPlacement, CharmPlacement } from "./viewer3d";
 import { resolveViewerModel, resolveViewerModelSync, type ViewerTarget } from "./viewerModel";
 import "./style.css";
 
@@ -721,7 +734,7 @@ async function loadSkins(key: string) {
     if (sheetKey.value !== key) return; // a newer selection won
     // After, never with: the picker must paint as soon as the catalog lands.
     void loadStockPrices(key);
-    sheetSkins.value = data.skins;
+    sheetSkins.value = key === "c4" ? c4Craftables(data) : data.skins;
     sheetFacets.value = { groups: data.groups, tints: data.tints };
     sheetGroup.value = sheetDefaultGroup.value;
   } catch (e) {
@@ -729,6 +742,22 @@ async function loadSkins(key: string) {
   } finally {
     if (sheetKey.value === key) sheetLoading.value = false;
   }
+}
+/**
+ * What the C4 sheet's Craft tab offers.
+ *
+ * The C4 has no finishes, so its catalog is a base item and an empty list — and
+ * the tab was empty. The plain C4 is still a real, ownable item that takes
+ * stickers, a charm and a name tag (cs2-lib, and the backend's craft route,
+ * both say so), so it is offered as the one thing to craft. The per-item facts
+ * are spelled out because a listing's `type` alone would hand it a float, a
+ * pattern and StatTrak, none of which a C4 has.
+ */
+function c4Craftables(data: { base: Skin | null; skins: Skin[] }): Skin[] {
+  if (data.skins.length || !data.base) return data.skins;
+  return [
+    { ...data.base, type: "weapon", model: "c4", hasWear: false, hasSeed: false, hasStatTrak: false, hasNameTag: true },
+  ];
 }
 // One place to clear the catalog-shaped filters, because there are four of them
 // and four reset points — a filter left set on a list it no longer applies to
@@ -1106,14 +1135,92 @@ const craftList = computed(() =>
   ),
 );
 
+/** Knife and glove craft cards carry the model label an owned card has — a
+ *  finish name alone ("Fade") does not say which of twenty knives it is. */
+const craftLabels = computed(() => sheetKey.value === "knife" || sheetKey.value === "gloves");
+
+/**
+ * The models a knife or glove craft sheet is sectioned by.
+ *
+ * One scroll over every finish, on purpose: browsing all of them is how people
+ * find a good-looking knife, and a click per model hid them. So the grid stays
+ * whole, gets a header per model that pins while you're in it, and a rail of
+ * model silhouettes above it follows the scroll and jumps on a click.
+ *
+ * A model is the backend's `base*` facts — the one unpainted item that shares a
+ * finish's modelKey (baseFacts in backend/src/catalog.ts), not its first
+ * finish. Catalog order, so the rail holds still when the sort changes.
+ */
+interface CraftModel {
+  key: string;
+  name: string;
+  /** Rail label: "Butterfly", not "Butterfly Knife" — the shape says knife. */
+  short: string;
+  /** What the rail and the header show for the model (see craftModelArt). */
+  art: Skin;
+}
+const craftModelList = computed<CraftModel[]>(() => {
+  if (!craftLabels.value) return [];
+  const byModel = new Map<string, Skin[]>();
+  for (const s of sheetSkins.value) {
+    const key = s.model ?? "";
+    const list = byModel.get(key);
+    if (list) list.push(s);
+    else byModel.set(key, [s]);
+  }
+  return [...byModel].map(([key, finishes]) => {
+    const name = finishes[0].baseName ?? weaponName(finishes[0]);
+    return { key, name, short: name.replace(/ (Knife|Gloves)$/, ""), art: craftModelArt(finishes, name) };
+  });
+});
+/**
+ * A model's face in the rail and on its header.
+ *
+ * A knife wears its own vanilla icon. A bare glove has none in the game, and
+ * the catalog render of one is an unlit dark pair that reads as a blank tile,
+ * so a glove model shows one of its own finishes instead — a different one each
+ * time the sheet loads.
+ */
+function craftModelArt(finishes: Skin[], name: string): Skin {
+  if (sheetKey.value === "gloves") return finishes[Math.floor(Math.random() * finishes.length)];
+  const s = finishes[0];
+  return s.baseId != null ? { ...s, id: s.baseId, name, altName: null, image: s.baseImage ?? s.image, paintMaterial: null } : s;
+}
+
 /** Craft grid stacks, plus the name a deck shows: the face's, minus the
- *  "(Colour)" that only distinguishes it from its own siblings. */
-const craftStacks = computed(() =>
-  stackByDesign(craftList.value, sheetDesign.value, (s) => s, (s) => s.id, tintColors.value).map((st) => ({
+ *  "(Colour)" that only distinguishes it from its own siblings. Knives and
+ *  gloves come out grouped by model. */
+const craftStacks = computed(() => {
+  const stacks = stackByDesign(craftList.value, sheetDesign.value, (s) => s, (s) => s.id, tintColors.value).map((st) => ({
     ...st,
     card: st.variants.length > 1 ? { ...st.face, name: st.face.name.replace(TINT_SUFFIX, "") } : st.face,
-  })),
-);
+  }));
+  if (!craftLabels.value) return stacks;
+  // A stable sort, so the order you picked still holds inside each model.
+  const order = new Map(craftModelList.value.map((m, i) => [m.key, i]));
+  return stacks.sort((a, b) => (order.get(a.card.model ?? "") ?? 0) - (order.get(b.card.model ?? "") ?? 0));
+});
+/** Each model with how many of its finishes pass the filters. The rail dims a
+ *  model a search emptied rather than reshuffling under you. */
+const craftModels = computed(() => {
+  const n = new Map<string, number>();
+  for (const st of craftStacks.value) n.set(st.card.model ?? "", (n.get(st.card.model ?? "") ?? 0) + 1);
+  return craftModelList.value.map((m) => ({ ...m, count: n.get(m.key) ?? 0 }));
+});
+/** Stack key -> the model whose section that card opens. */
+const craftSectionAt = computed(() => {
+  const out = new Map<string | number, (typeof craftModels.value)[number]>();
+  if (!craftLabels.value) return out;
+  const byKey = new Map(craftModels.value.map((m) => [m.key, m]));
+  let prev: string | null = null;
+  for (const st of craftStacks.value) {
+    const k = st.card.model ?? "";
+    const m = k !== prev ? byKey.get(k) : undefined;
+    if (m) out.set(st.key, m);
+    prev = k;
+  }
+  return out;
+});
 
 /** The design being drilled into, for the back chip's label. */
 const sheetDesignName = computed(() =>
@@ -1141,16 +1248,54 @@ const sheetResetKey = () =>
 // Both windows count CARDS, not items — a stack is one thing to scroll past.
 const ownedWindow = useRenderWindow(ownedStacks, sheetResetKey);
 const craftWindow = useRenderWindow(craftStacks, sheetResetKey);
-// Sheet: replace mode — every weapon eligible for this position (defaults are
-// free) plus owned skins of those weapons.
+/**
+ * The craft window as drawn, in sections: one per model on the knife and glove
+ * sheets, each opening with its header, and one unheaded section everywhere
+ * else. A section is its own block because a sticky header can't leave its
+ * containing block, and a grid item's is its own row — a header placed straight
+ * in the card grid never pinned.
+ */
+const craftGroups = computed(() => {
+  type Group = {
+    key: string;
+    sec: (typeof craftModels.value)[number] | null;
+    rows: { st: (typeof craftStacks.value)[number]; idx: number }[];
+  };
+  const groups: Group[] = [];
+  craftWindow.items.value.forEach((st, idx) => {
+    const sec = craftSectionAt.value.get(st.key) ?? null;
+    if (sec || !groups.length) groups.push({ key: sec?.key ?? "", sec, rows: [] });
+    groups[groups.length - 1].rows.push({ st, idx });
+  });
+  return groups;
+});
+/**
+ * Which track every card on the music kit CRAFT grid plays: the menu theme or
+ * the round-MVP anthem. One switch beside the grid's one volume, so comparing
+ * anthems is not a trip through each kit's editor. A viewing choice only —
+ * nothing is saved, and a kit with no anthem simply has no player under MVP
+ * rather than quietly playing its menu theme instead.
+ */
+const MUSIC_TRACKS = [{ id: "full" as const }, { id: "mvp" as const }];
+const sheetMusicTrack = ref<"full" | "mvp">("full");
+const cardTrack = (c: { audio?: string | null; mvpAudio?: string | null }) =>
+  (sheetMusicTrack.value === "mvp" ? c.mvpAudio : c.audio) ?? null;
+/** Offered only where some kit has an anthem to switch to — an instance that
+ *  has not run the MVP extraction would get a switch that empties the grid. */
+const sheetHasMvp = computed(() => craftStacks.value.some((st) => !!st.card.mvpAudio));
+// Sheet: replace mode — the base weapons that can take this position: eligible
+// for it, on this side, and not already somewhere else in the loadout — or in
+// it. That is the whole of the choice. Owned skins of those weapons used to
+// follow them here, which made Replace a second, unfiltered Owned tab; the
+// weapon you swap in is a base weapon, and its skins are on Owned once it is.
+// The one in the slot is left out for the same reason: "Default" on Owned is
+// how you take its skin off, and swapping a weapon for itself is no swap.
 const replaceOptions = computed(() => {
-  if (!isWeaponPos(selected.value)) return { defaults: [] as CatalogWeapon[], owned: [] as InventoryItem[] };
+  if (!isWeaponPos(selected.value)) return { defaults: [] as CatalogWeapon[] };
   const cats = catsForPos(selected.value);
   const used = new Set<string>();
   for (const g of POSITION_GROUPS) {
-    for (const p of g.positions) {
-      if (p !== selected.value) used.add(occupantModel(p));
-    }
+    for (const p of g.positions) used.add(occupantModel(p));
   }
   let eligible = weapons.value.filter(
     (w) => cats.includes(w.category) && w.teams.includes(team.value) && !used.has(w.model),
@@ -1160,11 +1305,7 @@ const replaceOptions = computed(() => {
   } else if (/^p/.test(selected.value)) {
     eligible = eligible.filter((w) => !START_PISTOLS.includes(w.model));
   }
-  const models = new Set(eligible.map((w) => w.model));
-  const owned = inventory.value.filter(
-    (i) => i.item?.model && models.has(i.item.model) && matchesFilters(itemName(i.item), i.item.rarity),
-  );
-  return { defaults: eligible.filter((w) => matchesFilters(w.name)), owned };
+  return { defaults: eligible.filter((w) => matchesFilters(w.name)) };
 });
 
 // ---- mutations --------------------------------------------------------------
@@ -1792,6 +1933,9 @@ const craft = ref<{
   wear: number;
   seed: number;
   stattrak: boolean;
+  /** Kills on the StatTrak module, for display only: the owned row's on an
+   *  edit, 0 for a new craft. Only the game server writes the count. */
+  stattrakCount: number;
   nametag: string;
   stickers: (Attach | null)[];
   patches: (Attach | null)[];
@@ -1859,6 +2003,14 @@ const craftType = computed(() => craft.value?.skin.type ?? craftInst.value?.item
  *  catalog listing that predates the field. */
 const craftSlotSays = (nope: string[]) => !nope.includes(selected.value);
 /**
+ * The item's OWN answer, when it gives one. The type gates below are right for
+ * every finish and wrong for a vanilla weapon — a plain C4 is `type: "weapon"`
+ * with no float, pattern or StatTrak — so an explicit `false` from cs2-lib
+ * closes the control the type would open. Absent leaves the type's answer.
+ */
+const craftItemSays = (fact: "hasWear" | "hasSeed" | "hasStatTrak" | "hasNameTag") =>
+  (craft.value?.skin ?? craftInst.value?.item)?.[fact] !== false;
+/**
  * Is the pattern being edited a CHARM's?
  *
  * Charms and weapons both have one, and they are not the same control: a
@@ -1867,10 +2019,12 @@ const craftSlotSays = (nope: string[]) => !nope.includes(selected.value);
  */
 const craftSeedIsCharm = computed(() => craftType.value === "keychain");
 const craftHasSeed = computed(() =>
-  craftType.value ? hasSeed({ type: craftType.value }) : craftSlotSays(["agent", "musickit", "graffiti", "collectible"]),
+  craftItemSays("hasSeed") &&
+  (craftType.value ? hasSeed({ type: craftType.value }) : craftSlotSays(["agent", "musickit", "graffiti", "collectible"])),
 );
 const craftHasWear = computed(() =>
-  craftType.value ? hasWear({ type: craftType.value }) : craftSlotSays(["agent", "musickit", "graffiti", "collectible", "pet"]),
+  craftItemSays("hasWear") &&
+  (craftType.value ? hasWear({ type: craftType.value }) : craftSlotSays(["agent", "musickit", "graffiti", "collectible", "pet"])),
 );
 /**
  * A pet's own facts — style count, stages, whether it takes a name — off the
@@ -1923,8 +2077,40 @@ const gunTraits = computed<TraitRow[]>(() => {
   const at = gunPlacement(def, Number(c.seed ?? 1));
   return gunPlacementTraits(def).map((t) => ({ key: t.key, label: t.label, value: at[t.key], display: formatGunTrait(t, at[t.key]) }));
 });
+/**
+ * Whether a gun's pattern gets the scored rail, or just a number under its
+ * Placement bars.
+ *
+ * The rail scrubs pattern NUMBERS, and neighbouring numbers put the artwork in
+ * unrelated places, so dragging it made the gun jump about. Where the finish has
+ * placement bars they are the smooth way through the same patterns (one bar IS
+ * the scrubber; with two or three you drag them or type the number), so the
+ * rail goes. Case Hardened keeps it: its rail measures how blue or gold every
+ * pattern lands, and hunting those peaks is a job no bar does.
+ */
+const gunPatternRail = computed(() => !gunTraits.value.length || !!craftPaintDef.value?.caseHardening);
 /** A gun's patterns are 1..1000 (randomizeCraft draws the same range). */
 const gunTable = () => (craftPaintDef.value ? gunPlacementTable(craftPaintDef.value, 1, 1000) : null);
+/** The open GLOVE's Gen2 def — null for the 73 older finishes, which roll only
+ *  the print's offset and rotation and so have no placement bars to show. Set
+ *  by the same watcher as patternMoves. */
+const craftGloveDef = shallowRef<GloveModernDef | null>(null);
+/** An older finish whose pattern moves its print — what it has instead. */
+const craftGloveLegacyMoves = ref(false);
+/** Does this glove's pattern change the 3D preview? */
+const gloveSeedLive = computed(
+  () => (!!craftGloveDef.value && gloveSeedMoves(craftGloveDef.value)) || craftGloveLegacyMoves.value,
+);
+/** The glove's twin of gunTraits: where the pattern puts the artwork. */
+const gloveTraits = computed<TraitRow[]>(() => {
+  const def = craftGloveDef.value;
+  const c = craft.value;
+  if (!def || !c) return [];
+  const at = glovePlacementAt(def, Number(c.seed ?? 1));
+  return glovePlacementTraits(def).map((t) => ({ key: t.key, label: t.label, value: at[t.key], display: formatGunTrait(t, at[t.key]) }));
+});
+const gloveTable = () =>
+  craftGloveDef.value ? glovePlacementTable(craftGloveDef.value, craftGloveSeedRange.value.min, craftGloveSeedRange.value.max) : null;
 /**
  * A sticker's scratch wear, on the sticker's OWN page.
  *
@@ -1968,21 +2154,35 @@ const craftWearRange = computed(() => {
  * because `selected` was still on a rifle.
  */
 const craftHasNameTag = computed(() =>
-  craftType.value
+  craftItemSays("hasNameTag") &&
+  (craftType.value
     // Guns and knives only. A name tag is applied with a Name Tag tool, and CS2
     // will not let you put one on gloves, an agent, a music kit or a charm —
     // the field was offered to gloves and charms purely because the old
     // exclusion list was written before either could be opened on its own.
     ? ["weapon", "melee"].includes(craftType.value) || (craftType.value === "pet" && !!craftPet.value?.hasNameTag)
-    : craftSlotSays(["agent", "musickit", "graffiti", "collectible", "gloves"]),
+    : craftSlotSays(["agent", "musickit", "graffiti", "collectible", "gloves"])),
 );
 // StatTrak is weapons, knives and music kits — NOT gloves, which do have a float
 // and a pattern. That distinction is invisible to a slot-shaped gate.
 const craftHasStatTrak = computed(() =>
-  craftType.value
+  craftItemSays("hasStatTrak") &&
+  (craftType.value
     ? ["weapon", "melee", "musickit"].includes(craftType.value)
-    : craftSlotSays(["agent", "graffiti", "collectible", "pet"]),
+    : craftSlotSays(["agent", "graffiti", "collectible", "pet"])),
 );
+/**
+ * A GLOVE's pattern range. Gloves get their own plain control rather than a
+ * rail: gloveComposite never reads the seed, so there is no look to score or
+ * aim at — but the seed is still a real attribute that rides the equipped feed
+ * to the game server, so it is worth being able to set.
+ */
+const craftGloveSeedRange = computed(() => {
+  const i = (craft.value?.skin ?? craftInst.value?.item) as { seedMin?: number | null; seedMax?: number | null } | undefined;
+  // Only a FINISH carries a range — the ten unpainted gloves have no pattern,
+  // and their listings say so by leaving it out.
+  return { known: i?.seedMin != null, min: i?.seedMin ?? 1, max: i?.seedMax ?? 1000 };
+});
 /**
  * Does the options column have anything to put in it?
  *
@@ -1995,6 +2195,10 @@ const craftHasStatTrak = computed(() =>
  *
  * Declared after the gates it sums; see the note on craftHasNameTag.
  */
+/** A music kit with a track to play — the editor's preview section. */
+const craftHasMusic = computed(
+  () => craft.value?.skin.type === "musickit" && !!(craft.value.skin.audio || craft.value.skin.mvpAudio),
+);
 const craftHasOptions = computed(
   () =>
     craftHasNameTag.value ||
@@ -2004,6 +2208,7 @@ const craftHasOptions = computed(
     craftHasStatTrak.value ||
     craftHasStyle.value ||
     craftHasStage.value ||
+    craftHasMusic.value ||
     attachKind.value !== "none",
 );
 const editingId = ref<number | null>(null);
@@ -2046,11 +2251,14 @@ watch(
   async ([pm, kind, type]) => {
     patternMoves.value = null;
     craftPaintDef.value = null;
-    // A GLOVE carries a pattern and is rendered by a different compositor —
-    // gloveComposite, which never reads the seed. Asking the weapon paint def
-    // about it would answer a question about a shader that is not the one
-    // drawing this. The pattern is still a real tradeable attribute, so the
-    // field stays; there is simply no look to browse.
+    craftGloveDef.value = null;
+    craftGloveLegacyMoves.value = false;
+    // A GLOVE carries a pattern and is rendered by a different compositor.
+    // Asking the weapon paint def about it would answer a question about a
+    // shader that is not the one drawing this, so the weapon rail stays off.
+    // The glove's own answer is its own def: on the 22 Gen2 finishes the
+    // pattern rolls the artwork's placement (gloveRolls), on the other 73 the
+    // print's offset and rotation — either way the glove control shows it live.
     //
     // Asked of the ECONOMY TYPE as well as the viewer kind, because the two
     // become known at different moments and only one of them is synchronous.
@@ -2059,6 +2267,15 @@ watch(
     // by then and settles it without waiting for anything.
     if (kind === "glove" || type === "glove") {
       patternMoves.value = false;
+      if (!pm) return;
+      const [ldef, gdef] = await Promise.all([
+        loadGlovePaintDef(pm).catch(() => null),
+        loadGloveModernDef(pm).catch(() => null),
+      ]);
+      // Same subject check as below, for the same out-of-order reason.
+      if ((craft.value?.skin.paintMaterial ?? null) !== pm) return;
+      craftGloveDef.value = gdef;
+      craftGloveLegacyMoves.value = !!ldef && gloveLegacySeedMoves(ldef);
       return;
     }
     if (!pm) return;
@@ -2122,7 +2339,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onDevHudKey));
 /** The catalog's agent list, kept for its `patchSlots` — see patchSlotCount. */
 const catalogAgents = ref<Skin[]>([]);
 /**
- * Poses offered for an agent in 3D.
+ * Poses offered for an agent in 3D — the list itself is in AgentControls.
  *
  * "Open" exists for PATCHES specifically: at any lifelike arm angle the upper
  * arms cover the side and sleeve positions, so there is no one pose that both
@@ -2130,19 +2347,39 @@ const catalogAgents = ref<Skin[]>([]);
  * user picks. "Ready" is the model's own tools_preview clip — the only real
  * animation an agent ships.
  */
-const AGENT_POSES = [
-  { id: "ready" as const, label: "Ready", hint: "The model's own in-game pose" },
-  { id: "stand" as const, label: "Stand", hint: "Relaxed standing pose" },
-  { id: "open" as const, label: "Open", hint: "Arms out — shows every patch position" },
-];
 /** The model's own pose leads: it is how CS2 presents the agent, so it is what
  *  someone expects to see first. "Open" is a tool, not a default. */
 const DEFAULT_AGENT_POSE = "ready" as const;
 const agentPose = ref<"stand" | "open" | "ready">(DEFAULT_AGENT_POSE);
+/** How the agent moves — see AgentMotion in viewer3d.ts. NOT reset per item
+ *  the way the pose is: someone who picked Still to place patches wants the
+ *  next agent still too. */
+const agentMotion = ref<AgentMotion>("idle");
 function setAgentPose(pose: "stand" | "open" | "ready") {
   agentPose.value = pose;
+  // Picking a pose means "show me THIS one", which a cycle would walk away
+  // from — the viewer drops to idle, and the Motion pills follow.
+  if (agentMotion.value === "cycle") agentMotion.value = "idle";
   modalViewer.current()?.setAgentPose(pose);
 }
+function setAgentMotion(motion: AgentMotion) {
+  agentMotion.value = motion;
+  modalViewer.current()?.setAgentMotion(motion);
+}
+// While cycling, the viewer moves through the poses on its own; follow it so
+// the Pose pills light the one on screen. A poll rather than a callback: it is
+// four times a second for a highlight, and only while a cycle runs.
+let agentPoseFollow: ReturnType<typeof setInterval> | null = null;
+watch(agentMotion, (m) => {
+  if (agentPoseFollow) clearInterval(agentPoseFollow);
+  agentPoseFollow = null;
+  if (m !== "cycle") return;
+  agentPoseFollow = setInterval(() => {
+    const p = modalViewer.current()?.agentPose();
+    if (p && p !== agentPose.value) agentPose.value = p;
+  }, 250);
+});
+onBeforeUnmount(() => agentPoseFollow && clearInterval(agentPoseFollow));
 // Steam-imported items are READ-ONLY (they mirror a real inventory). Editing
 // one opens the same modal as a DUPLICATE: saving creates an editable copy.
 const duplicating = ref(false);
@@ -2176,7 +2413,7 @@ function openCraft(skin: Skin) {
   const skinIsWeapon = !skin.type || skin.type === "weapon" || skin.type === "melee";
   craftModel.value =
     skin.model ?? (skinIsWeapon && isWeaponPos(selected.value) ? occupantModel(selected.value) : null);
-  craft.value = { skin, wear: DEFAULT_WEAR, seed: 1, stattrak: false, nametag: "", stickers: emptySlots(MAX_STICKERS), patches: emptySlots(MAX_PATCHES), charm: null, style: null, stage: null };
+  craft.value = { skin, wear: DEFAULT_WEAR, seed: 1, stattrak: false, stattrakCount: 0, nametag: "", stickers: emptySlots(MAX_STICKERS), patches: emptySlots(MAX_PATCHES), charm: null, style: null, stage: null };
   craftBaseline = ""; // new craft — no stored render to reuse
   // A brand-new craft gets a URL too: /craft/<skinId>, with the draft itself in
   // the query. Without it the one state worth sharing before you commit to it
@@ -2214,6 +2451,7 @@ async function restoreDraftRoute(skinId: number) {
         wear: d.wear,
         seed: d.seed,
         stattrak: d.stattrak,
+        stattrakCount: 0,
         nametag: d.nametag,
         stickers: d.stickers
           .slice(0, MAX_STICKERS)
@@ -2234,10 +2472,13 @@ async function restoreDraftRoute(skinId: number) {
     fail(e);
   }
 }
-function openEdit(inst: InventoryItem) {
+function openEdit(inst: InventoryItem, warm: "edit" | "open" = "edit") {
   agentPose.value = DEFAULT_AGENT_POSE;
   mdebug("openEdit()", { inst: inst.id, hasItem: !!inst.item });
   if (!inst.item) return;
+  // Start the 3D view's downloads now, all at once, rather than one after
+  // another as the mount reaches each — see src/prefetch.ts.
+  prefetchView(inst, warm);
   craftModel.value = inst.item.model ?? null;
   viewOnly.value = false;
   craftInstId.value = inst.id;
@@ -2269,10 +2510,21 @@ function openEdit(inst: InventoryItem) {
     skin: {
       id: inst.item.id, name: inst.item.name, altName: inst.item.altName ?? null, rarity: inst.item.rarity ?? "", image: inst.item.image, paintMaterial: inst.item.paintMaterial ?? null, legacyPaint: !!inst.item.legacyPaint, type: inst.item.type, model: inst.item.model ?? null, def: inst.item.def,
       hasNameTag: inst.item.hasNameTag, styleCount: inst.item.styleCount, upgradeLevels: inst.item.upgradeLevels, defaultUpgradeLevel: inst.item.defaultUpgradeLevel,
+      // The per-item facts the craftHas* gates ask first (craftItemSays), the
+      // pattern range the glove control is bounded by, and the float range the
+      // Wear slider is. craftWearRange reads THIS projection, never the
+      // instance behind it, so leaving the range out gave every owned item a
+      // 0..1 slider on Edit — a Doppler, which exists only to 0.08, dragged to
+      // 0.9 and then failed to save.
+      hasWear: inst.item.hasWear, hasSeed: inst.item.hasSeed, hasStatTrak: inst.item.hasStatTrak, seedMin: inst.item.seedMin, seedMax: inst.item.seedMax,
+      wearMin: inst.item.wearMin, wearMax: inst.item.wearMax,
+      // Music kits: what the editor's player plays.
+      audio: inst.item.audio ?? null, mvpAudio: inst.item.mvpAudio ?? null,
     },
     wear: inst.wear ?? DEFAULT_WEAR,
     seed: inst.seed ?? 1,
     stattrak: inst.stattrak,
+    stattrakCount: inst.stattrak_count ?? 0,
     nametag: inst.nametag ?? "",
     stickers,
     patches,
@@ -2320,7 +2572,8 @@ function openView(inst: InventoryItem) {
     viewOnly.value = true;
     return;
   }
-  withRouteSync(() => openEdit(inst));
+  // "open": a view, so nothing is warmed for editing it.
+  withRouteSync(() => openEdit(inst, "open"));
   viewOnly.value = true;
 }
 /**
@@ -2442,9 +2695,15 @@ watch(
 );
 function randomSeed() {
   if (!craft.value) return;
-  // A pet's pattern runs 1..100,000, not a finish's 1..1000.
+  // A pet's pattern runs 1..100,000, not a finish's 1..1000, and a glove's is
+  // whatever its own range says.
   const pet = craftPet.value;
-  craft.value.seed = pet ? Math.floor(rand(pet.seedMin, pet.seedMax + 1)) : Math.floor(rand(1, 1001));
+  const glove = craftType.value === "glove" && craftGloveSeedRange.value.known ? craftGloveSeedRange.value : null;
+  craft.value.seed = pet
+    ? Math.floor(rand(pet.seedMin, pet.seedMax + 1))
+    : glove
+      ? Math.floor(rand(glove.min, glove.max + 1))
+      : Math.floor(rand(1, 1001));
 }
 // Charm patterns run to 100000, an order of magnitude past a weapon's 1000 —
 // they are their own attribute with their own range, not the weapon's reused.
@@ -2454,7 +2713,7 @@ function randomSeed() {
 function resetCraft() {
   if (craft.value)
     Object.assign(craft.value, {
-      wear: DEFAULT_WEAR, seed: 1, stattrak: false, nametag: "",
+      wear: DEFAULT_WEAR, seed: 1, stattrak: false, stattrakCount: 0, nametag: "",
       stickers: emptySlots(MAX_STICKERS), patches: emptySlots(MAX_PATCHES), charm: null,
       style: null, stage: null,
     });
@@ -2491,6 +2750,9 @@ function craftBody() {
     charm_offset: c.charm ? { x: c.charm.x ?? null, y: c.charm.y ?? null, z: c.charm.z ?? null, seed: c.charm.seed ?? null, inst: c.charm.inst ?? null } : null,
   };
 }
+/** The kill count the module shows. Read-only: kills are the game server's to
+ *  write, so save never sends one. */
+const craftStatTrakCount = () => craft.value?.stattrakCount ?? 0;
 // Inspect the DRAFT — works before the craft has ever been saved.
 async function openCraftInspect() {
   if (!craft.value) return;
@@ -2498,11 +2760,10 @@ async function openCraftInspect() {
     fetchDraftInspectLink({
       item_id: craft.value!.skin.id,
       ...craftBody(),
-      // Kills are NOT part of craftBody(): they live on the owned row, not in
-      // the form, and craftBody() is also what save sends. Same number the 3D
-      // stage puts on the module, so inspecting an edit of a StatTrak item
-      // opens CS2 on its real count instead of a fresh 0.
-      stattrak_count: craft.value!.stattrak ? craftInst.value?.stattrak_count ?? 0 : 0,
+      // Not part of craftBody(), which is also what save sends and kills are
+      // never saved from here. Same number the 3D stage shows, so inspecting
+      // an edit opens CS2 on its real count instead of a fresh 0.
+      stattrak_count: craft.value!.stattrak ? craftStatTrakCount() : 0,
     }),
   );
 }
@@ -2581,7 +2842,7 @@ async function saveCraft(andEquip = false) {
     if (editingId.value != null) {
       const updated = await updateInstance(editingId.value, body);
       renderedIds.delete(updated.id);
-      void generateRender(updated).then((ok) => {
+      void generateRender(updated, { force: true }).then((ok) => {
         if (ok) bakeStamp.value = { ...bakeStamp.value, [updated.id]: Date.now() };
       });
       // Patch in place rather than refetching. refreshAll() swaps the whole
@@ -2605,6 +2866,7 @@ async function saveCraft(andEquip = false) {
               wear: updated.wear,
               seed: updated.seed,
               stattrak: updated.stattrak,
+              stattrak_count: updated.stattrak_count,
               nametag: updated.nametag,
               style: updated.style,
               upgrade_level: updated.upgrade_level,
@@ -2680,16 +2942,30 @@ const queuedIds = ref<Set<number>>(new Set());
 // So on touch devices: keep a short backlog, and leave a gap between bakes for
 // the browser to actually reclaim the last one. Cards that lose their turn show
 // catalog art and ask again next time they scroll into view.
+/** Set once the server says an extraction finished after this tab loaded (see
+ *  uploadRender's `stale`). No card is baked after that until a reload. */
+// Declared above generateRender, which an immediate watcher can call during
+// setup.
+let cardsStale = false;
 const TOUCH_BAKE_BACKLOG = 3;
 const TOUCH_BAKE_COOLDOWN_MS = 400;
 const bakeCooldown = () =>
   isCoarse.value ? new Promise((r) => setTimeout(r, TOUCH_BAKE_COOLDOWN_MS)) : Promise.resolve();
 
-function generateRender(inst: InventoryItem): Promise<boolean> {
-  if (renderedIds.has(inst.id) || queuedIds.value.has(inst.id)) return Promise.resolve(false);
-  if (isCoarse.value && queuedIds.value.size >= TOUCH_BAKE_BACKLOG) return Promise.resolve(false);
+/**
+ * `force`: bake even though a card may already be stored, and even if a bake
+ * for this item is already queued. For SAVE, which is the one moment we know
+ * the stored card is out of date — the item was just changed. Without it, a
+ * save whose change the card's filename does not capture (stickers or a charm,
+ * on a backend that predates card_look) found the old card, called it done and
+ * reloaded it; and an older queued bake still held the PRE-edit item.
+ */
+function generateRender(inst: InventoryItem, opts: { force?: boolean } = {}): Promise<boolean> {
+  if (cardsStale) return Promise.resolve(false);
+  if (!opts.force && (renderedIds.has(inst.id) || queuedIds.value.has(inst.id))) return Promise.resolve(false);
+  if (!opts.force && isCoarse.value && queuedIds.value.size >= TOUCH_BAKE_BACKLOG) return Promise.resolve(false);
   queuedIds.value = new Set([...queuedIds.value, inst.id]);
-  const run = renderQueue.then(() => generateRenderNow(inst));
+  const run = renderQueue.then(() => generateRenderNow(inst, !!opts.force));
   // The cooldown rides the QUEUE, not the returned promise: the next bake waits
   // for it, the caller doesn't.
   renderQueue = run.catch(() => false).then(bakeCooldown);
@@ -2749,8 +3025,9 @@ const renderServes = (url: string) =>
 // game ships no icon at all, and none of them can show a coat, a stage or the
 // body a pattern draws. Coat and stage are in the render key (renderKeyFor).
 const CARD_BAKE_KINDS = new Set<ViewerKind>(["weapon", "charm", "glove", "pet"]);
-async function generateRenderNow(inst: InventoryItem): Promise<boolean> {
-  if (renderedIds.has(inst.id)) return false;
+async function generateRenderNow(inst: InventoryItem, force = false): Promise<boolean> {
+  if (cardsStale) return false;
+  if (!force && renderedIds.has(inst.id)) return false;
   // Resolved, not read off `item.model`. A charm names no model of its own —
   // the econ schema names its mesh and 23 of them share one blank — so the sync
   // answer is `undefined` ("ask the backend"), and the old `item.model` gate
@@ -2764,7 +3041,7 @@ async function generateRenderNow(inst: InventoryItem): Promise<boolean> {
   // cache clear the browser still holds the deleted image, so an un-busted
   // probe loads it, concludes the server is fine and skips the re-bake — which
   // is exactly why clearing renders used to leave every stale card in place.
-  if (await renderServes(renderUrlFor(inst) + renderBust(inst))) {
+  if (!force && (await renderServes(renderUrlFor(inst) + renderBust(inst)))) {
     renderedIds.add(inst.id);
     return true;
   }
@@ -2844,6 +3121,19 @@ async function generateRenderNow(inst: InventoryItem): Promise<boolean> {
     if (prev) URL.revokeObjectURL(prev);
     localRenders.value = { ...localRenders.value, [inst.id]: URL.createObjectURL(blob) };
     const up = await uploadRender(inst.id, blob);
+    if (up.stale) {
+      // An extraction finished after this tab loaded, so every card it bakes
+      // from here is the previous assets under the previous name. Stop baking
+      // and say why once, rather than reporting a store that is fine as broken.
+      if (!cardsStale) {
+        cardsStale = true;
+        notify(
+          tr("inventory.notify.cards_stale", "The 3D models were just updated on the server. Reload the page to see the new cards."),
+          "success",
+        );
+      }
+      return true;
+    }
     if (!up.ok && !uploadWarned) {
       uploadWarned = true;
       notify(tr("inventory.notify.render_upload_failed",
@@ -2937,6 +3227,10 @@ const modal3dAvailable = ref(false);
  */
 const craftHeld = ref(false);
 const craftHeldAvailable = computed(() => craftTarget.value?.kind === "weapon");
+/** Held, for THIS item — `craftHeld` is the sticky choice, which outlives it.
+ *  Opening an agent after holding a rifle left it true, and the agent got the
+ *  weapon's buttons. */
+const craftHolding = computed(() => craftHeld.value && craftHeldAvailable.value);
 const craftStageCmp = ref<InstanceType<typeof ItemStage> | null>(null);
 const craftPanelW = ref(0);
 const modalViewerEl = computed<HTMLElement | null>(() => craftStageCmp.value?.hostEl ?? null);
@@ -2964,10 +3258,13 @@ const craftStage = useViewerStage({
   handle: () => modalViewer.current(),
   // Held: the same weapon actions the focus stage offers, against this viewer.
   // Two screens showing one item should answer the same keys.
-  viewmodel: () => craftHeld.value,
+  //
+  // craftHolding, not the toggle: the agent that inherited a rifle's `held`
+  // got Fire and Reload buttons and lost Reset and Flip.
+  viewmodel: () => craftHolding.value,
   extraKeys: () =>
-    craftHeld.value
-      ? FPV_ACTIONS.map((a) => ({
+    craftHolding.value
+      ? fpvActionsFor(craftTarget.value?.model).map((a) => ({
           key: a.key,
           cap: a.cap,
           label: a.label,
@@ -3325,7 +3622,7 @@ async function stickerGeom(model: string) {
   // needs the sticker anchors: it is the model's own answer to where an
   // attachment goes. Spread into ViewerOpts, so adding it here reaches the live
   // stage, the 2D still and the card bake at once.
-  return { stickerBounds: g.bounds, stickerSlots: g.slots, charmSurfaces: g.charmQuads };
+  return { stickerBounds: g.bounds, stickerSlots: g.slots, stickerMasks: g.masks, charmSurfaces: g.charmQuads };
 }
 // Craft state → viewer placement shapes.
 function craftStickerPlacements(): StickerPlacement[] {
@@ -3338,6 +3635,55 @@ function craftStickerPlacements(): StickerPlacement[] {
 function setStickerWear(slot: number, w: number) {
   const st = craft.value?.stickers[slot];
   if (st) st.w = Math.min(1, Math.max(0, w));
+}
+/**
+ * Move a sticker to another slot, swapping with whatever is there.
+ *
+ * Slot order is draw order — the game paints the slots in turn, so where two
+ * stickers overlap the later slot is on top, and the viewer orders its decals
+ * the same way. Reordering used to mean deleting a sticker and adding it again.
+ *
+ * Each keeps its place on the gun. x/y are offsets from the SLOT'S anchor (see
+ * slotMarkup in viewer3d), so they are re-expressed against the new slot's —
+ * picked the way the viewer picks them: this finish's body, the exact anchor or
+ * else the first. Rotation is not anchor-relative and carries over as is; the
+ * size follows the new slot's scale, as it does in game.
+ */
+async function moveSticker(from: number, to: number) {
+  const c = craft.value;
+  const model = craftTarget.value?.model;
+  if (!c || from === to || !c.stickers[from]) return;
+  const geo = model ? await fetchStickerGeometry(model) : null;
+  if (craft.value !== c) return;
+  const body = c.skin.legacyPaint && c.skin.paintMaterial ? "body_legacy" : "body_hd";
+  const mine = (geo?.slots ?? []).filter((s) => s.mesh === body);
+  const anchors = mine.length ? mine : (geo?.slots ?? []);
+  const first = anchors.reduce<(typeof anchors)[number] | undefined>((lo, s) => (!lo || s.index < lo.index ? s : lo), undefined);
+  const anchorOf = (slot: number) => anchors.find((s) => s.index === slot) ?? first;
+  const fit = (v: number, r?: [number, number]) => Math.round((r ? Math.min(r[1], Math.max(r[0], v)) : v) * 1e4) / 1e4;
+  const reanchor = (st: NonNullable<typeof c.stickers[number]>, a: number, b: number) => {
+    const fromA = anchorOf(a);
+    const toA = anchorOf(b);
+    if (!fromA || !toA || fromA === toA) return st;
+    return {
+      ...st,
+      x: fit(fromA.offset[0] + (st.x ?? 0) - toA.offset[0], geo?.bounds?.x),
+      y: fit(fromA.offset[1] + (st.y ?? 0) - toA.offset[1], geo?.bounds?.y),
+    };
+  };
+  const a = c.stickers[from];
+  const b = c.stickers[to];
+  c.stickers[to] = a ? reanchor(a, from, to) : null;
+  c.stickers[from] = b ? reanchor(b, to, from) : null;
+}
+/** The sticker tile being dragged onto another, for the reorder. */
+const stickerDragFrom = ref<number | null>(null);
+const stickerDropOn = ref<number | null>(null);
+function onStickerTileDrop(to: number) {
+  const from = stickerDragFrom.value;
+  stickerDragFrom.value = null;
+  stickerDropOn.value = null;
+  if (from != null) void moveSticker(from, to);
 }
 function craftCharmPlacement(): CharmPlacement | null {
   const c = craft.value?.charm;
@@ -3444,6 +3790,7 @@ async function craftVisualOpts(target: ViewerTarget) {
     petStyle: target.kind === "pet" ? (c?.style ?? null) : null,
     petClip: target.kind === "pet" ? petClip.value : null,
     petStage: target.kind === "pet" ? (c?.stage ?? null) : null,
+    agentMotion: target.kind === "agent" ? agentMotion.value : undefined,
   };
 }
 async function mountModalViewer() {
@@ -3467,7 +3814,7 @@ async function mountModalViewer() {
       // Held, on the same terms as the focus view: the equipped gloves wear
       // their finish and the equipped agent lends a sleeve.
       firstPerson:
-        craftHeld.value && craftHeldAvailable.value
+        craftHolding.value
           ? {
               arms: fpvArms.value,
               action: "idle" as const,
@@ -3476,11 +3823,8 @@ async function mountModalViewer() {
             }
           : null,
       // Live 3D, so a real readout — the owned item's count when the modal is
-      // showing one (craftInstId covers editing AND duplicating, which
-      // editingId does not), and 0 for a brand-new craft that has no kills.
-      stattrak: craft.value?.stattrak
-        ? { count: inventory.value.find((i) => i.id === craftInstId.value)?.stattrak_count ?? 0 }
-        : null,
+      // showing one (editing or duplicating), and 0 for a brand-new craft.
+      stattrak: craft.value?.stattrak ? { count: craftStatTrakCount() } : null,
       nametag: craft.value?.nametag ?? null,
       // Drags write straight into the craft form — the numeric inputs follow
       // live, and confirm sends the same offsets to the game server.
@@ -3507,7 +3851,12 @@ async function mountModalViewer() {
       // Re-apply the chosen pose: the 2D/3D toggle remounts, and a viewer that
       // came back in the default stance after the user picked "Open" would look
       // like the control had stopped working.
-      if (craftTarget.value?.kind === "agent") handle.setAgentPose(agentPose.value);
+      // Motion goes AFTER the pose: setAgentPose ends a cycle, so the other
+      // order would leave a remounted cycle standing still.
+      if (craftTarget.value?.kind === "agent") {
+        handle.setAgentPose(agentPose.value);
+        handle.setAgentMotion(agentMotion.value);
+      }
       // The charm's authored albedo, for the pattern rail's gradient. Sampled
       // off the model because for most charms that is the only place it exists
       // — see ViewerHandle.charmAlbedoTile. Taken here rather than in the rail
@@ -3757,11 +4106,7 @@ watch(
   () => craft.value?.stattrak,
   (on) => {
     if (!modalViewer.current() || !craft.value) return;
-    modalViewer.current()!.setStatTrak(
-      on
-        ? { count: inventory.value.find((i) => i.id === craftInstId.value)?.stattrak_count ?? 0 }
-        : null,
-    );
+    modalViewer.current()!.setStatTrak(on ? { count: craftStatTrakCount() } : null);
   },
 );
 // Name tag → swap the engraved plate on the live viewer. Its own watcher for
@@ -4108,13 +4453,15 @@ const advancedPlacement = ref(false);
  * published for everybody (the store is shared art, so the backend takes writes
  * from admins only), and a later visitor's 404 on the icon tries that stored
  * copy before spending a GL context. Anyone else's bake stays in their session —
- * the upload is refused and that is fine. The gloves stay session-scoped until
- * they join CATALOG_RENDER_TYPES on both sides.
+ * the upload is refused and that is fine. The gloves joined when the craft
+ * sheet showed those eight as the face of each glove model — eight bakes on
+ * every visit to the gloves sheet, for every visitor. It shows a finish there
+ * now (craftModelArt), so a bare glove only gets here if something asks.
  */
 const catalogArtTried = new Set<number>();
 /** Must match CATALOG_RENDER_TYPES in backend/src/main.ts — the server refuses
  *  the rest. */
-const CATALOG_RENDER_TYPES = new Set(["pet"]);
+const CATALOG_RENDER_TYPES = new Set(["pet", "glove"]);
 /** Ids whose STORED catalog render has already been tried this session. */
 const catalogStoredTried = new Set<number>();
 async function bakeCatalogArt(skin: { id: number; name?: string; model?: string | null; type?: string | null; paintMaterial?: string | null }) {
@@ -4185,6 +4532,12 @@ watch(
 function onCatalogArtLoad(e: Event) {
   (e.target as HTMLImageElement).style.visibility = "";
 }
+// Armory pets and their hero share the same stored-card/model fallback as
+// the catalogue picker, including one bake attempt per item per session.
+provide("catalogArt", {
+  src: (item: Skin) => catalogArt.value[item.id] ?? item.image ?? undefined,
+  onError: onCatalogArtError,
+});
 onBeforeUnmount(() => Object.values(catalogArt.value).forEach((u) => URL.revokeObjectURL(u)));
 
 // ---- Attachment 3D preview --------------------------------------------------
@@ -4866,7 +5219,7 @@ const sheetResultCount = computed(() =>
     ? ownedStacks.value.length
     : sheetMode.value === "craft"
       ? craftStacks.value.length
-      : replaceOptions.value.defaults.length + replaceOptions.value.owned.length,
+      : replaceOptions.value.defaults.length,
 );
 function resetSheetFilters() {
   sheetSearch.value = "";
@@ -5280,18 +5633,27 @@ const COMPACT_CRAFT_TILE = 108;
 const COMPACT_CRAFT_CHROME = 56;
 /** Rows, not cards. Compact + a mode you pick from rather than browse. */
 const sheetRows = computed(() => isCompact.value && sheetMode.value !== "craft");
+const pickerCardTracks = computed(() => {
+  const tile = isCompact.value ? COMPACT_CRAFT_TILE : sheetCardSize.value;
+  const chrome = isCompact.value ? COMPACT_CRAFT_CHROME : CARD_CHROME_PX;
+  return { columns: `repeat(auto-fill, minmax(${tile}px, 1fr))`, row: `${tile + chrome}px` };
+});
 const pickerGridStyle = computed(() => {
   if (sheetRows.value) {
     return { display: "grid", gridTemplateColumns: "1fr", gridAutoRows: `${COMPACT_ROW_H}px` };
   }
-  const tile = isCompact.value ? COMPACT_CRAFT_TILE : sheetCardSize.value;
-  const chrome = isCompact.value ? COMPACT_CRAFT_CHROME : CARD_CHROME_PX;
-  return {
-    display: "grid",
-    gridTemplateColumns: `repeat(auto-fill, minmax(${tile}px, 1fr))`,
-    gridAutoRows: `${tile + chrome}px`,
-  };
+  const t = pickerCardTracks.value;
+  // Craft draws its cards inside sections (craftGroups), each a grid of its own
+  // on these same tracks, so the scroller's rows just fit whatever they hold.
+  return { display: "grid", gridTemplateColumns: t.columns, gridAutoRows: sheetMode.value === "craft" ? "auto" : t.row };
 });
+/** A craft section's card grid: the picker's own tracks, so sections line up
+ *  with each other and with every other sheet. */
+const craftCardGrid = computed(() => ({
+  display: "grid",
+  gridTemplateColumns: pickerCardTracks.value.columns,
+  gridAutoRows: pickerCardTracks.value.row,
+}));
 
 // The picker holds entries that aren't ItemTiles — the craft prompt, the stock
 // default, the Replace candidates. They have to follow the same card/row switch
@@ -5337,6 +5699,7 @@ const onSheetScroll = (e: Event) => {
   requestAnimationFrame(() => {
     sheetScrollPending = false;
     measureSheetScroll(el);
+    spyCraftSection(el);
   });
 };
 // Function ref rather than a plain one: the scroller is keyed on
@@ -5346,8 +5709,14 @@ const onSheetScroll = (e: Event) => {
 let sheetScrollEl: HTMLElement | null = null;
 function setSheetScrollEl(el: unknown) {
   sheetScrollEl = (el as HTMLElement) ?? null;
-  if (sheetScrollEl) requestAnimationFrame(() => measureSheetScroll(sheetScrollEl));
-  else sheetHasMore.value = false;
+  if (sheetScrollEl) {
+    requestAnimationFrame(() => {
+      measureSheetScroll(sheetScrollEl);
+      spyCraftSection(sheetScrollEl);
+    });
+  } else {
+    sheetHasMore.value = false;
+  }
 }
 // A settled search term means a new list, so the panel goes back to the top.
 // Lives HERE, beside sheetScrollEl, not next to the debounce that produces the
@@ -5385,6 +5754,143 @@ watch(
  *  staggering every appended row — the `sheet-settled` gate only covers the
  *  options column. */
 const sheetCellClass = (i: number) => (i < WINDOW_FIRST ? "animate-sheet-in" : "");
+
+// ---- knife and glove model rail ---------------------------------------------
+// See craftModelList. The rail sits above the scroller rather than inside it, so
+// it is pinned for free and its Jump menu isn't clipped by the scroller; only
+// the model headers are sticky, inside the grid.
+const craftCurrent = ref("");
+watch(craftModelList, (list) => {
+  if (!list.some((m) => m.key === craftCurrent.value)) craftCurrent.value = list[0]?.key ?? "";
+});
+/** Set while a jump's smooth scroll is in flight, so the rail stays on the
+ *  target instead of flicking through every model on the way there. */
+let craftJumping = 0;
+let craftJumpSeq = 0;
+/**
+ * Which model you're in: the last one whose header is at least halfway into the
+ * pinned slot, which is the moment it visibly takes over from the one before.
+ * The headers are sticky, so where they ARE says nothing; the section block a
+ * header opens still starts where the layout put it.
+ */
+function spyCraftSection(el: HTMLElement | null) {
+  if (!el || craftJumping || !craftSectionAt.value.size) return;
+  const secs = el.querySelectorAll<HTMLElement>("[data-craft-group]");
+  if (!secs.length) return;
+  const hh = el.querySelector<HTMLElement>("[data-craft-sec]")?.offsetHeight ?? 0;
+  const top = el.getBoundingClientRect().top;
+  let cur = secs[0].dataset.craftGroup ?? "";
+  for (const s of secs) {
+    if (s.getBoundingClientRect().top - top <= hh / 2) cur = s.dataset.craftGroup ?? cur;
+  }
+  craftCurrent.value = cur;
+}
+// A new list (search, a filter, the window growing) moves every section.
+watch([craftStacks, () => craftWindow.items.value.length], () => nextTick(() => spyCraftSection(sheetScrollEl)));
+const prefersReducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+/** Resolves once a smooth scroll has stopped moving, or after ~2s if something
+ *  keeps it going. */
+function scrollSettled(el: HTMLElement) {
+  return new Promise<void>((done) => {
+    let last = -1;
+    let still = 0;
+    let frames = 0;
+    const tick = () => {
+      still = Math.abs(el.scrollTop - last) < 0.5 ? still + 1 : 0;
+      last = el.scrollTop;
+      if (still > 4 || ++frames > 120) done();
+      else requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+async function jumpToCraftModel(key: string) {
+  const el = sheetScrollEl;
+  const i = craftStacks.value.findIndex((st) => (st.card.model ?? "") === key);
+  if (!el || i < 0) return;
+  // The grid is windowed: a section has to be mounted before it can be
+  // scrolled to. A far jump mounts everything up to it in one go.
+  craftWindow.reveal(i + (craftModels.value.find((m) => m.key === key)?.count ?? 1));
+  const mine = (craftJumping = ++craftJumpSeq);
+  craftCurrent.value = key;
+  await nextTick();
+  const sec = el.querySelector<HTMLElement>(`[data-craft-group="${CSS.escape(key)}"]`);
+  if (sec) {
+    const to = i === 0 ? 0 : el.scrollTop + sec.getBoundingClientRect().top - el.getBoundingClientRect().top;
+    el.scrollTo({ top: to, behavior: prefersReducedMotion() ? "auto" : "smooth" });
+    await scrollSettled(el);
+  }
+  if (craftJumping !== mine) return;
+  craftJumping = 0;
+  spyCraftSection(el);
+}
+
+const craftRailEdge = ref({ l: false, r: false });
+let craftRailEl: HTMLElement | null = null;
+const craftRailRo = new ResizeObserver(() => measureCraftRail());
+onBeforeUnmount(() => craftRailRo.disconnect());
+/** Fades and arrows only on a side that has more models past it. */
+function measureCraftRail() {
+  const r = craftRailEl;
+  if (!r) return;
+  const l = r.scrollLeft > 4;
+  const right = r.scrollLeft < r.scrollWidth - r.clientWidth - 4;
+  if (l !== craftRailEdge.value.l || right !== craftRailEdge.value.r) craftRailEdge.value = { l, r: right };
+}
+function centerCraftRail(smooth = true) {
+  const r = craftRailEl;
+  const b = r?.querySelector<HTMLElement>(`[data-model="${CSS.escape(craftCurrent.value)}"]`);
+  if (!r || !b) return;
+  r.scrollTo({ left: b.offsetLeft - (r.clientWidth - b.offsetWidth) / 2, behavior: smooth && !prefersReducedMotion() ? "smooth" : "auto" });
+}
+// Function ref, called on every render: only a NEW element is set up, or each
+// re-render would yank the rail back to centre while you're browsing it.
+function setCraftRailEl(el: unknown) {
+  const next = (el as HTMLElement) ?? null;
+  if (next === craftRailEl) return;
+  if (craftRailEl) craftRailRo.unobserve(craftRailEl);
+  craftRailEl = next;
+  if (!next) return;
+  craftRailRo.observe(next);
+  nextTick(() => {
+    centerCraftRail(false);
+    measureCraftRail();
+  });
+}
+watch(craftCurrent, () => centerCraftRail());
+watch(craftModels, () => nextTick(measureCraftRail));
+function nudgeCraftRail(dir: -1 | 1) {
+  craftRailEl?.scrollBy({ left: dir * craftRailEl.clientWidth * 0.8, behavior: prefersReducedMotion() ? "auto" : "smooth" });
+}
+// Mouse drag scrolls the rail (touch already does, natively).
+let railDrag: { x: number; left: number } | null = null;
+let railDragged = false;
+function onCraftRailDown(e: PointerEvent) {
+  if (e.pointerType !== "mouse" || e.button !== 0 || !craftRailEl) return;
+  railDrag = { x: e.clientX, left: craftRailEl.scrollLeft };
+  railDragged = false;
+  window.addEventListener("pointermove", onCraftRailMove);
+  window.addEventListener("pointerup", onCraftRailUp);
+  window.addEventListener("pointercancel", onCraftRailUp);
+}
+function onCraftRailMove(e: PointerEvent) {
+  if (!railDrag || !craftRailEl) return;
+  const dx = e.clientX - railDrag.x;
+  if (Math.abs(dx) > 5) railDragged = true;
+  if (railDragged) craftRailEl.scrollLeft = railDrag.left - dx;
+}
+function onCraftRailUp() {
+  window.removeEventListener("pointermove", onCraftRailMove);
+  window.removeEventListener("pointerup", onCraftRailUp);
+  window.removeEventListener("pointercancel", onCraftRailUp);
+  railDrag = null;
+  // The click that ends a drag lands on whatever silhouette is under the
+  // pointer; it isn't a pick.
+  setTimeout(() => (railDragged = false));
+}
+function pickCraftModel(key: string) {
+  if (!railDragged) void jumpToCraftModel(key);
+}
 
 // Selecting a slot from anywhere else (focus rail, a menu action, equipping)
 // pulls the rail to the category that actually contains it — otherwise the
@@ -5735,6 +6241,16 @@ async function loadStockPrices(key: string) {
     // No prices is the normal state on an instance with the feed off.
   }
 }
+// The sheet can open before the price status has landed — a page opened
+// straight on ?slot=knife loads its finishes first — and loadStockPrices bails
+// while the feed isn't known to be ready, with nothing to ask again. Every
+// craft card then showed "—" until you picked the slot a second time.
+watch(
+  () => priceStatus.value?.ready,
+  (ready) => {
+    if (ready && sheetKey.value) void loadStockPrices(sheetKey.value);
+  },
+);
 
 /** A craft card's cost, and the caption that keeps it honest about which wear
  *  bracket answered — "brand new" is Factory New only where FN exists. */
@@ -6250,8 +6766,11 @@ const equipSide = computed<EquipSide>(() => {
   const ok = (v: EquipSide) => opts.some((o) => o.value === v && !o.disabled);
   const pick = equipSidePick.value;
   if (pick && pick.key === equipSideKey.value && ok(pick.side)) return pick.side;
-  // Both wherever both can hold it — what most people want, and asked for.
-  if (ok("both")) return "both";
+  // The side you picked before choosing the item: crafting from the CT
+  // loadout equips on CT. It used to default to Both wherever both sides could
+  // hold the item, which put a CT pick on T as well unless you caught the
+  // dropdown. Both stays one click away; a side that cannot hold the item
+  // (an AK from CT) falls through to the one that can.
   if (ok(team.value)) return team.value;
   return opts.find((o) => !o.disabled)?.value ?? team.value;
 });
@@ -6585,6 +7104,28 @@ const FPV_ACTIONS: { action: ClipAction; key: string; cap: string; label: string
   { action: "draw", key: "1", cap: "1", label: "Deploy", icon: "deploy" },
 ];
 /**
+ * The actions worth a button for this model — those its clips cover, less what
+ * the game does not allow (see viewmodelActions). A C4 is inspected and drawn,
+ * never fired or reloaded; a knife has no shot; a Zeus fires but recharges.
+ * Until the index answers, everything the rule allows — which is what every
+ * item got before.
+ */
+const fpvActionSets = new Map<string, Set<ClipAction> | null>();
+const fpvActionsVersion = ref(0);
+function fpvActionsFor(model: string | null | undefined) {
+  void fpvActionsVersion.value;
+  if (!model) return FPV_ACTIONS;
+  if (!fpvActionSets.has(model)) {
+    fpvActionSets.set(model, null);
+    void viewmodelActions(model).then((have) => {
+      fpvActionSets.set(model, have);
+      fpvActionsVersion.value++;
+    });
+  }
+  const have = fpvActionSets.get(model);
+  return FPV_ACTIONS.filter((a) => (have ? have.has(a.action) : !viewmodelCannot(model, a.action)));
+}
+/**
  * The arms to wear — the equipped gloves, else the team's stock pair.
  *
  * The glove GLB is where the arm skeleton and the inspect clip live (see
@@ -6602,11 +7143,12 @@ const fpvArms = computed<string>(() => {
  * Null for the stock pair, which has no finish and is correct unpainted — the
  * default gloves' own textures are the real thing rather than a placeholder.
  */
-const fpvArmsPaint = computed<{ material: string; wear: number | null } | null>(() => {
+const fpvArmsPaint = computed<{ material: string; wear: number | null; seed: number | null } | null>(() => {
   const row = rowFor("gloves");
   const inst = isSkinned(row) ? row?.item ?? null : null;
   const material = inst?.paintMaterial ?? null;
-  return material ? { material, wear: row?.wear ?? null } : null;
+  // The pattern places the artwork on the 22 substrate/surface finishes.
+  return material ? { material, wear: row?.wear ?? null, seed: row?.seed ?? null } : null;
 });
 /**
  * The equipped agent's model, for the first-person sleeve.
@@ -6652,7 +7194,7 @@ const focusStage = useViewerStage({
     // among them: it is where the weapon RESTS, so pressing an action again
     // returns to it rather than needing a button of its own.
     if (fpvOn.value) {
-      for (const a of FPV_ACTIONS) {
+      for (const a of fpvActionsFor(focusTarget.value?.model)) {
         rows.push({
           key: a.key,
           cap: a.cap,
@@ -6892,6 +7434,12 @@ const focusPrice = computed(() => {
 const focusSpecs = computed<AttachSource | null>(() =>
   focusInstance.value ?? (viewerId.value && isSkinned(focusRow.value) ? focusRow.value ?? null : null),
 );
+/** Float and pattern for focus's own row (compact, or no spec column). Only a
+ *  skinned slot has either: a default finish is still a type that TAKES both,
+ *  so asking the type alone printed "—" under each heading, and the row's top
+ *  border then ran across the bottom of the stage with nothing under it. */
+const focusShowsFloat = computed(() => isSkinned(focusRow.value) && hasWear(focusRow.value?.item));
+const focusShowsPattern = computed(() => isSkinned(focusRow.value) && hasSeed(focusRow.value?.item));
 // InventoryItem → viewer placement shapes (Focus + loadout 3D overlay).
 /**
  * "Applied to AK-47 | Redline", for an attachment that is currently on a gun.
@@ -7227,6 +7775,8 @@ async function load() {
       void loadPriceStatus().then(() => loadPrices());
       loadSkins(sheetKey.value);
       queueLoadoutRenders();
+      // Idle-time warm of the equipped items' 3D views — see src/prefetch.ts.
+      prefetchEquipped(current, inv, team.value);
       // Off to the side: the nag dot is the least important thing on screen and
       // must never hold up (or fail) the load it rides along with.
       void loadSteamSyncState();
@@ -7334,19 +7884,17 @@ function onGlobalKey(e: KeyboardEvent) {
 // The sheet's "/"-shortcut target (see onGlobalKey). The inventory grid's own
 // search box is a ref inside useInventoryView, with the rest of that screen.
 const sheetSearchEl = ref<HTMLInputElement | null>(null);
-// `serverBuild` is intentionally not destructured: it was only ever passed to
-// AdminConsole as `:server-build`, which never declared the prop, so the value
-// has never been displayed anywhere. The composable still logs the stamp and
-// still drives `staleBuild`. Surfacing it in the admin gear dialog would be a
-// small follow-up, not a refactor.
-const { staleBuild, reloadPage } = useBuildCheck();
+// Both build times go to the settings page: which build this page is running
+// (bundleBuild, stamped into the bundle) and the newest the server has
+// (serverBuild, from build-info.json). Telling "reload to get the fix" from
+// "the fix is not out" used to take a look at the deployed files.
+const { staleBuild, reloadPage, serverBuild, bundleBuild } = useBuildCheck();
 
 onMounted(() => {
   window.addEventListener("keydown", onGlobalKey);
   load();
-  // Idle-time fetch of the viewer chunk, so the first item opened doesn't pay
-  // for it — see prefetchViewer3d.
-  prefetchViewer3d();
+  // No idle-time fetch of the viewer chunk: the first 3D view fetches it and
+  // three together instead — see the top of ./viewer3dLazy.
   // Admin app load asks the panel where the invsim cvars stand — that answer is
   // what lights the gear badge before /admin is ever opened. Read-only: this
   // used to write three of the operator's server configs as a side effect.
@@ -8212,8 +8760,53 @@ if (MDEBUG) {
 
     <!-- Loading: a ghost of the loadout screen, breathing. Same skeleton for
          both views — the shape says "your loadout is coming" either way, and
-         the real content's entrance cascade lands on top of it. -->
-    <div v-if="loading" aria-busy="true" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+         the real content's entrance cascade lands on top of it.
+         DESKTOP IS BUILT FROM THE REAL BOXES: LoadoutGrid's column, header and
+         cell classes, three rows of extras, and the sheet's own toolbar row
+         and card tracks (pickerCardTracks). Drawn freehand it had a taller
+         agent, two rows of extras and a sheet of tall cards with no toolbar,
+         and the whole screen visibly shrank when the real one landed on it. -->
+    <div v-if="loading && !isCompact" aria-busy="true" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div class="flex min-h-0 flex-1 overflow-hidden">
+        <div class="flex w-full min-w-[200px] max-w-[340px] flex-1 flex-col pb-3 pl-4 pr-1 pt-3">
+          <div class="flex items-baseline border-b border-border/60 px-1 pb-2">
+            <span class="animate-skeleton rounded bg-secondary/40 text-f11 font-semibold uppercase tracking-cs2 text-transparent" :style="{ '--i': 0 }">Equipment</span>
+          </div>
+          <div class="flex flex-1 flex-col gap-2.5 pt-2">
+            <div v-for="r in 2" :key="'rail' + r" class="animate-skeleton min-h-[96px] flex-1 rounded-lg bg-secondary/40" :style="{ '--i': r }"></div>
+            <div class="animate-skeleton min-h-[132px] flex-[1.6] rounded-lg bg-secondary/40" :style="{ '--i': 3 }"></div>
+            <div class="grid flex-none grid-cols-2 gap-2">
+              <div v-for="(x, r) in EXTRAS" :key="x.slot" class="animate-skeleton h-[70px] rounded-lg bg-secondary/40" :style="{ '--i': 4 + r }"></div>
+            </div>
+          </div>
+        </div>
+        <div class="flex flex-1 gap-3 overflow-hidden px-4 pb-4 pt-3">
+          <div v-for="c in 3" :key="'col' + c" class="flex min-w-[212px] max-w-[460px] flex-1 flex-col">
+            <div class="flex items-baseline border-b border-border/60 px-1 pb-2">
+              <span class="animate-skeleton rounded bg-secondary/40 text-f11 font-semibold uppercase tracking-cs2 text-transparent" :style="{ '--i': c }">Pistols</span>
+            </div>
+            <div class="flex flex-1 flex-col gap-2 pt-2">
+              <div v-for="r in 5" :key="'cell' + r" class="animate-skeleton min-h-[96px] flex-1 rounded-lg bg-secondary/40" :style="{ '--i': r * 3 + c }"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="flex flex-none flex-col overflow-hidden border-t border-border" :style="{ height: SHEET_COLLAPSED_CSS }">
+        <div class="flex flex-none items-center gap-2.5 border-b border-border px-6 py-2.5">
+          <div class="animate-skeleton h-8 w-[178px] rounded-lg bg-secondary/40" :style="{ '--i': 0 }"></div>
+          <div class="animate-skeleton h-8 w-28 rounded-md bg-secondary/40" :style="{ '--i': 1 }"></div>
+          <div class="animate-skeleton h-8 w-28 rounded-md bg-secondary/40" :style="{ '--i': 2 }"></div>
+          <div class="animate-skeleton ml-auto h-8 w-[220px] rounded-md bg-secondary/40" :style="{ '--i': 3 }"></div>
+        </div>
+        <div
+          class="grid min-h-0 flex-1 content-start gap-2.5 overflow-hidden px-6 pb-6 pt-3.5"
+          :style="{ gridTemplateColumns: pickerCardTracks.columns, gridAutoRows: pickerCardTracks.row }"
+        >
+          <div v-for="r in 6" :key="'sh' + r" class="animate-skeleton rounded-lg bg-secondary/40" :style="{ '--i': r }"></div>
+        </div>
+      </div>
+    </div>
+    <div v-else-if="loading" aria-busy="true" class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="flex min-h-0 flex-1 gap-3 overflow-hidden px-4 pb-4 pt-3">
         <div class="flex w-full min-w-[200px] max-w-[340px] flex-1 flex-col gap-2.5 py-0">
           <div class="animate-skeleton h-3 w-24 rounded bg-secondary/40" :style="{ '--i': 0 }"></div>
@@ -8441,48 +9034,31 @@ if (MDEBUG) {
                      screen you land on to look at a weapon. -->
                 <ViewerSettingsButton v-if="focus3d" v-model:open="devHudOpen" :changed="devFlagCount" />
                 <StageTabs v-if="focus3dAvailable" :is3d="focus3d" list-class="h-8" @update:is3d="setFocus3d" />
-                <!-- Edit + Inspect + Share live top right, same corner as every
-                     other surface (3D overlay, craft modal, item detail).
-                     Edit leads: focus is where you land on a slot, and until now
-                     the only way into the editor from here was the context menu
-                     or a trip back to the grid. -->
-                <button
-                  v-if="isSkinned(focusRow) && canEdit && focusInstance && isCustomizable(focusRow?.item)"
-                  :class="[FOCUS_STAGE, 'tac-action border-border text-muted-foreground']"
-                  title="Edit this item — wear, pattern, stickers, charm"
-                  @click="openEdit(focusInstance)"
-                >
-                  <Pencil class="h-3.5 w-3.5" /> Edit
-                </button>
-                <!-- Same rule as the item modal: a stage showing a weapon
-                     offers to open it in game. Deliberately none of the three
-                     gates the Edit button above needs — `canEdit` (inspecting
-                     is not editing, and a loadout you are VISITING is exactly
-                     the one you most want to see in game), `isSkinned` (a
-                     default weapon inspects fine — it's paintindex 0) and
-                     `focusInstance` (a cell with no instance behind it is
-                     precisely those two cases; inspectLoadoutRow sends the row
-                     as a draft instead). -->
-                <button
-                  v-if="canInspect(focusRow?.item)"
-                  :class="[FOCUS_STAGE, 'tac-action border-border text-muted-foreground']"
-                  title="Launch CS2 and inspect this item in-game"
-                  @click="inspectLoadoutRow(focusRow)"
-                >
-                  <ExternalLink class="h-3.5 w-3.5" /> {{ linkOpening ? 'Opening…' : 'Inspect' }}
-                </button>
-                <ShareMenu
-                  v-if="isSkinned(focusRow) && canEdit"
-                  :links="instanceShareLinks(focusInstance?.id)"
-                  :note="ITEM_LINK_NOTE"
-                  :btn-class="FOCUS_STAGE"
-                />
-                <!-- Someone else's item: their link and a craftable copy,
-                     instead of item links that would name YOUR inventory. -->
-                <ShareMenu
-                  v-else-if="visitorShareLinks.length"
-                  :links="visitorShareLinks"
-                  :btn-class="FOCUS_STAGE"
+                <!-- The item modal's own row, not a copy of it: Inspect in game,
+                     Share, then edit as an icon — what you can do with the item,
+                     after the two that change the picture. Focus kept a row of
+                     its own for a while (an "Edit" with a label, a shorter
+                     "Inspect"), and the two screens drifted into looking like
+                     different screens.
+                     Inspect skips the gates edit needs: `canEdit` (a loadout you
+                     are VISITING is exactly the one you most want to see in
+                     game), `isSkinned` (a default weapon inspects fine — it's
+                     paintindex 0) and `focusInstance` (a cell with no instance
+                     behind it is precisely those two cases; inspectLoadoutRow
+                     sends the row as a draft instead). Someone else's item
+                     shares their link and a craftable copy, not item links that
+                     would name YOUR inventory. -->
+                <CraftActions
+                  view-only
+                  :can-inspect="canInspect(focusRow?.item)"
+                  :link-opening="linkOpening"
+                  :share-links="isSkinned(focusRow) && canEdit ? instanceShareLinks(focusInstance?.id) : visitorShareLinks"
+                  :share-note="isSkinned(focusRow) && canEdit ? ITEM_LINK_NOTE : undefined"
+                  :can-edit-item="isSkinned(focusRow) && canEdit && !!focusInstance && isCustomizable(focusRow?.item)"
+                  :read-only="!!focusInstance && isReadOnly(focusInstance)"
+                  :compact-btn-class="MODAL_HEAD_BTN"
+                  @inspect="inspectLoadoutRow(focusRow)"
+                  @edit="focusInstance && openEdit(focusInstance)"
                 />
                 <button
                   v-if="viewerId && !viewingSelf && isSkinned(focusRow)"
@@ -8532,23 +9108,48 @@ if (MDEBUG) {
                   leave-active-class="transition duration-100 ease-in"
                   leave-to-class="opacity-0 scale-105"
                 >
-                  <div :key="selected" class="grid h-full w-full min-h-0 place-items-center">
+                  <!-- With the music kit's players under it, the art takes the row
+                       that is LEFT (minmax(0,1fr)) and shrinks to it: at its own
+                       height it pushed the players off the bottom of the stage
+                       whenever the sheet was open. -->
+                  <div
+                    :key="selected"
+                    class="grid h-full w-full min-h-0 place-items-center"
+                    :class="(focusRow?.item?.audio || focusRow?.item?.mvpAudio) && 'grid-rows-[minmax(0,1fr)_auto] gap-3'"
+                  >
                     <ItemArt
                       :inst="isSpecial(selected) ? null : cellInstance(selected)"
                       :image="isSpecial(selected) ? specialImage(selected) : cellImage(selected)"
-                      :class="cn('w-[min(64%,520px)] object-contain animate-float motion-reduce:animate-none', !isSkinned(focusRow) && 'opacity-50')"
+                      :class="cn('max-h-full min-h-0 w-[min(64%,520px)] object-contain animate-float motion-reduce:animate-none', !isSkinned(focusRow) && 'opacity-50')"
                       style="filter: drop-shadow(0 22px 30px rgba(0,0,0,0.55))"
                     />
                     <!-- A second grid row under the art, and only for a music kit.
                          This stage has no 3D for one (isNo3d), so the flat icon was
                          the entire focus view of an item whose whole content is a
                          sound. Wider than the tile's copy because there is room:
-                         this is the screen you land on to study one item. -->
-                    <MusicPlayer
-                      v-if="focusRow?.item?.audio"
-                      :src="focusRow.item.audio"
-                      class="w-[min(80%,420px)]"
-                    />
+                         this is the screen you land on to study one item.
+                         Both tracks, labelled, the way the editor lays them out:
+                         one bare bar left the round-MVP anthem out entirely and
+                         said nothing about which song was playing. -->
+                    <!-- mb-8: clear of the card's bottom edge, which the last row
+                         otherwise sat right on. -->
+                    <div
+                      v-if="focusRow?.item?.audio || focusRow?.item?.mvpAudio"
+                      class="mb-8 flex w-[min(80%,420px)] flex-col gap-2"
+                    >
+                      <div class="flex items-center justify-between">
+                        <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.preview', 'Preview') }}</span>
+                        <MusicVolume wide />
+                      </div>
+                      <div v-if="focusRow.item.audio" class="flex items-center gap-2">
+                        <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.full_song', 'Full song') }}</span>
+                        <MusicPlayer :src="focusRow.item.audio" :volume="false" class="min-w-0 flex-1" />
+                      </div>
+                      <div v-if="focusRow.item.mvpAudio" class="flex items-center gap-2">
+                        <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.mvp', 'MVP') }}</span>
+                        <MusicPlayer :src="focusRow.item.mvpAudio" :volume="false" class="min-w-0 flex-1" />
+                      </div>
+                    </div>
                   </div>
                 </Transition>
               </template>
@@ -8568,7 +9169,7 @@ if (MDEBUG) {
                  nothing left in it but its own top border and 14px of padding
                  taken off the model. -->
             <div
-              v-if="isCompact || !focusSpecs"
+              v-if="(isCompact || !focusSpecs) && (focusShowsFloat || focusShowsPattern)"
               class="relative z-[2] flex flex-wrap items-center gap-6 border-t border-border pt-3.5"
             >
               <!-- Float and pattern used to be spelled out here by hand, and
@@ -8587,14 +9188,14 @@ if (MDEBUG) {
                    printed the float and the pattern a second time three inches
                    away. -->
               <template v-if="isCompact || !focusSpecs">
-                <div v-if="hasWear(focusRow?.item)" class="flex flex-col gap-1">
+                <div v-if="focusShowsFloat" class="flex flex-col gap-1">
                   <span class="text-f10 uppercase tracking-cs4 text-muted-foreground">Float</span>
                   <span class="font-mono text-f13">{{ focusRow?.wear != null ? focusRow.wear.toFixed(4) : '—' }}</span>
                   <!-- WearBar is THE way wear renders — bare drops its numbers,
                        since "Float" above already prints the value. -->
                   <WearBar v-if="focusRow?.wear != null" :item="focusRow?.item" :wear="focusRow.wear" bare class="mt-1.5 w-[180px]" />
                 </div>
-                <div v-if="hasSeed(focusRow?.item)" class="flex flex-col gap-1">
+                <div v-if="focusShowsPattern" class="flex flex-col gap-1">
                   <span class="text-f10 uppercase tracking-cs4 text-muted-foreground">Pattern</span>
                   <span class="font-mono text-f13">{{ focusRow?.seed != null ? '#' + focusRow.seed : '—' }}</span>
                 </div>
@@ -8730,6 +9331,22 @@ if (MDEBUG) {
             />
             <SortDirection v-model="sheetDir" :kind="sheetSortKind" :hint="sheetSortHint" />
           </template>
+          <!-- Music kits: ONE volume for the whole grid, here, instead of a
+               slider on every card — on Owned and Craft alike. The level is
+               shared, so every player follows it. -->
+          <MusicVolume v-if="sheetMode !== 'replace' && sheetKey === 'musickit'" wide class="px-1" />
+          <!-- Beside the volume: what every card on the Craft grid plays. -->
+          <PillTabs
+            v-if="sheetMode === 'craft' && sheetKey === 'musickit' && sheetHasMvp"
+            :items="MUSIC_TRACKS"
+            :item-key="(t) => t.id"
+            :active="sheetMusicTrack"
+            list-class="flex-none"
+            button-class="relative z-[1] flex h-6 items-center rounded-md px-2.5 text-f10 uppercase tracking-wider transition-colors"
+            @select="(v) => (sheetMusicTrack = v as 'full' | 'mvp')"
+          >
+            <template #default="{ item: t }">{{ t.id === 'mvp' ? tr('inventory.music.mvp', 'MVP') : tr('inventory.music.full_song', 'Full song') }}</template>
+          </PillTabs>
           <!-- Owned only: same Synced/Crafted filter as the Inventory grid, so
                read-only Steam imports can be kept out of the equip picker. -->
           <PillTabs
@@ -9037,11 +9654,113 @@ if (MDEBUG) {
           leave-active-class="transition duration-100"
           leave-to-class="opacity-0"
         >
+        <!-- One unit per mode and sheet, the knife/glove rail included: the
+             rail fades with the grid it belongs to, instead of popping in over
+             the old grid while that one is still fading out. -->
+        <div :key="sheetMode + '|' + sheetKey" class="flex min-h-0 flex-1 flex-col">
+        <!-- Knives and gloves: the model rail (see craftModelList). Above the
+             scroller, not in it: pinned for free, and the Jump menu opens over
+             the grid instead of being clipped by it. Its height is held while
+             a sheet's models load, so the grid under it doesn't jump when they
+             arrive. -->
         <div
-          :key="sheetMode + '|' + sheetKey"
+          v-if="sheetMode === 'craft' && craftLabels && sheetDesign === null"
+          class="flex flex-none items-center gap-2 border-b border-border py-1"
+          :class="isCompact ? 'min-h-[62px] px-3' : 'min-h-[66px] px-6'"
+        >
+          <!-- A fixed label, not the current model: the pinned header right
+               below already names it, and a button that grew and shrank with
+               the name shoved the whole rail sideways as you scrolled. -->
+          <FilterDropdown
+            class="flex-none"
+            label="Jump to"
+            :model-value="craftCurrent"
+            :options="craftModels.map((m) => ({ value: m.key, label: m.name, disabled: !m.count }))"
+            @update:model-value="jumpToCraftModel"
+          />
+          <span class="h-9 w-px flex-none bg-border" aria-hidden="true"></span>
+          <div class="relative min-w-0 flex-1">
+            <div
+              :ref="setCraftRailEl"
+              class="craft-rail relative flex gap-1 overflow-x-auto overscroll-x-contain"
+              @scroll.passive="measureCraftRail"
+              @pointerdown="onCraftRailDown"
+            >
+              <button
+                v-for="m in craftModels"
+                :key="m.key"
+                type="button"
+                :data-model="m.key"
+                class="flex flex-none flex-col items-center gap-[3px] rounded-md border px-1 py-1 transition-colors disabled:cursor-default disabled:opacity-30"
+                :class="[
+                  isCompact ? 'w-[80px]' : 'w-[92px]',
+                  craftCurrent === m.key ? 'border-[color:var(--acc)]' : 'border-transparent',
+                ]"
+                :style="craftCurrent === m.key ? { background: accentSoft } : {}"
+                :title="m.name"
+                :aria-label="m.name"
+                :aria-current="craftCurrent === m.key || undefined"
+                :disabled="!m.count"
+                @click="pickCraftModel(m.key)"
+              >
+                <!-- Fixed tracks: with an auto row the art's height:100% has
+                     nothing to resolve against and it draws at its natural
+                     height, straight over the label.
+                     Small on purpose. The sheet under the loadout is ~430px
+                     tall, and at 62px of art the rail and the pinned header
+                     left less than one 218px row of knives. -->
+                <span class="grid w-full place-items-center" :class="isCompact ? 'h-[30px]' : 'h-[34px]'" style="grid-template: 100% / 100%">
+                  <img
+                    :src="catalogArt[m.art.id] ?? m.art.image ?? undefined"
+                    alt=""
+                    draggable="false"
+                    class="h-full w-full select-none object-contain"
+                    @error="onCatalogArtError($event, m.art)"
+                    @load="onCatalogArtLoad"
+                  />
+                </span>
+                <span
+                  class="max-w-full truncate text-f8 uppercase leading-tight tracking-wider"
+                  :class="craftCurrent === m.key ? 'text-foreground' : 'text-muted-foreground/60'"
+                >{{ m.short }}</span>
+              </button>
+            </div>
+            <div
+              v-show="craftRailEdge.l"
+              class="pointer-events-none absolute inset-y-0 left-0 flex w-14 items-center"
+              style="background: linear-gradient(90deg, hsl(var(--background)) 30%, transparent)"
+            >
+              <button
+                type="button"
+                class="pointer-events-auto grid h-8 w-6 place-items-center rounded-md border border-border bg-card text-foreground transition-colors hover:border-muted-foreground"
+                aria-label="Scroll models left"
+                @click="nudgeCraftRail(-1)"
+              ><ChevronLeft class="h-3.5 w-3.5" /></button>
+            </div>
+            <div
+              v-show="craftRailEdge.r"
+              class="pointer-events-none absolute inset-y-0 right-0 flex w-14 items-center justify-end"
+              style="background: linear-gradient(270deg, hsl(var(--background)) 30%, transparent)"
+            >
+              <button
+                type="button"
+                class="pointer-events-auto grid h-8 w-6 place-items-center rounded-md border border-border bg-card text-foreground transition-colors hover:border-muted-foreground"
+                aria-label="Scroll models right"
+                @click="nudgeCraftRail(1)"
+              ><ChevronRight class="h-3.5 w-3.5" /></button>
+            </div>
+          </div>
+        </div>
+
+        <div
           :ref="setSheetScrollEl"
-          class="flex-1 auto-rows-min content-start overflow-y-auto overscroll-contain"
-          :class="isCompact ? 'gap-1.5 px-3 pb-8 pt-2' : 'gap-2.5 px-6 pb-6 pt-3.5'"
+          class="min-h-0 flex-1 auto-rows-min content-start overflow-y-auto overscroll-contain"
+          :class="[
+            isCompact ? 'gap-1.5 px-3 pb-8' : 'gap-2.5 px-6 pb-6',
+            // A sectioned sheet opens on a model header that sits flush under
+            // the rail; the usual top padding was a dead band above it.
+            sheetMode === 'craft' && craftLabels ? 'pt-0' : isCompact ? 'pt-2' : 'pt-3.5',
+          ]"
           :style="pickerGridStyle"
           @scroll.passive="onSheetScroll"
         >
@@ -9120,6 +9839,7 @@ if (MDEBUG) {
                 :show-price="pricesOn"
                 :price-pending="pricesPending"
                 :price-source="priceSourceLabel"
+                :music-volume="false"
                 :class="sheetCellClass(idx)"
                 :style="{ '--i': idx + 2 }"
                 draggable="true"
@@ -9161,8 +9881,39 @@ if (MDEBUG) {
               <!-- The wrapper exists so the "deck" layers can sit OUTSIDE the
                    card: the card itself is overflow-hidden (the art scales on
                    hover) and would clip them. -->
+              <section
+                v-for="g in craftGroups"
+                :key="g.key"
+                class="col-span-full flex flex-col"
+                :class="isCompact ? 'gap-1.5' : 'gap-2.5'"
+                :data-craft-group="g.sec?.key"
+              >
+              <!-- A model's header: pins to the top of the scroller while you're
+                   in that model, until the end of its section pushes it off.
+                   Out into the scroller's side padding so cards don't peek past
+                   it. Sticky offsets start below any top padding, which is why a
+                   sectioned scroller has none (see its pt-0). -->
               <div
-                v-for="(st, idx) in craftWindow.items.value"
+                v-if="g.sec"
+                :data-craft-sec="g.sec.key"
+                class="sticky top-0 z-[5] flex items-center gap-3 border-b border-border bg-background py-1.5"
+                :class="isCompact ? '-mx-3 px-3' : '-mx-6 px-6'"
+              >
+                <img
+                  :src="catalogArt[g.sec.art.id] ?? g.sec.art.image ?? undefined"
+                  alt=""
+                  class="h-5 w-9 flex-none object-contain"
+                  @error="onCatalogArtError($event, g.sec.art)"
+                  @load="onCatalogArtLoad"
+                />
+                <span class="truncate text-f13 uppercase tracking-cs1">{{ g.sec.name }}</span>
+                <span class="flex-none font-mono text-f10 text-muted-foreground">
+                  {{ g.sec.count }} {{ g.sec.count === 1 ? 'finish' : 'finishes' }}
+                </span>
+              </div>
+              <div :class="isCompact ? 'gap-1.5' : 'gap-2.5'" :style="craftCardGrid">
+              <div
+                v-for="{ st, idx } in g.rows"
                 :key="st.key"
                 class="relative h-full"
                 :class="sheetCellClass(idx)"
@@ -9204,8 +9955,23 @@ if (MDEBUG) {
                        bottom), but the POSITION is what people have learned, and
                        a price that moves between two grids of the same shape is
                        a price you have to hunt for. -->
+                  <!-- Knives and gloves add the owned card's model label above it,
+                       and the price hangs under the label there instead. -->
+                  <span v-if="craftLabels" class="relative z-[2] block min-w-0 pr-8">
+                    <span class="block truncate text-f9 uppercase tracking-cs1 text-muted-foreground/70">
+                      {{ weaponName(st.card) }}
+                    </span>
+                    <PriceTag
+                      v-if="pricesOn"
+                      class="absolute left-0 top-full z-[3]"
+                      size="xs"
+                      :value="stockPriceOf(st.card.id)?.value"
+                      :missing="!stockPriceOf(st.card.id)"
+                      :title="stockPriceTip(st.card.id)"
+                    />
+                  </span>
                   <PriceTag
-                    v-if="pricesOn"
+                    v-else-if="pricesOn"
                     class="absolute left-2.5 top-2 z-[3]"
                     size="xs"
                     :value="stockPriceOf(st.card.id)?.value"
@@ -9228,9 +9994,20 @@ if (MDEBUG) {
                        a music kit from, and until now every card on it was a
                        name and a disc. The player is a <span> tree precisely so
                        it can live inside this <button> — see MusicPlayer. -->
-                  <MusicPlayer v-if="st.card.audio" :src="st.card.audio" class="relative z-[2] mt-1.5" />
+                  <!-- Keyed on the track, so the switch above remounts it: the old
+                       player's teardown stops its track rather than leaving it
+                       playing with no button on screen that owns it. -->
+                  <MusicPlayer
+                    v-if="cardTrack(st.card)"
+                    :key="cardTrack(st.card)!"
+                    :src="cardTrack(st.card)!"
+                    :volume="false"
+                    class="relative z-[2] mt-1.5"
+                  />
                 </button>
               </div>
+              </div>
+              </section>
               <InfiniteSentinel
                 :count="craftWindow.items.value.length"
                 :done="craftWindow.done.value"
@@ -9261,35 +10038,14 @@ if (MDEBUG) {
                 <div class="mt-0.5 text-f8 uppercase tracking-wider text-muted-foreground/60">Default</div>
               </div>
             </button>
-            <button
-              v-for="(i, idx) in replaceOptions.owned"
-              :key="'own' + i.id"
-              data-role="skin"
-              class="animate-sheet-in relative overflow-hidden rounded-lg border border-border bg-card text-left transition-colors hover:border-[color:var(--acc)]"
-              :class="SHEET_ENTRY"
-              :style="[
-                { '--i': replaceOptions.defaults.length + idx },
-                i.item?.rarity ? (sheetRows ? { borderLeft: `3px solid ${i.item.rarity}` } : { borderBottom: `3px solid ${i.item.rarity}` }) : {},
-              ]"
-              @click="equipInstanceAt(i, selected)"
-              @contextmenu.prevent="openItemCtx(i, $event)"
-            >
-              <span class="pointer-events-none absolute inset-0" :style="glowStyle(i.item?.rarity, 0.22)"></span>
-              <div :class="[SHEET_ART, 'relative z-[2]']">
-                <img :src="i.item?.image ?? undefined" alt="" loading="lazy" decoding="async" class="max-h-full max-w-full object-contain" />
-              </div>
-              <div :class="[SHEET_LABEL, 'relative z-[2] flex items-center gap-1.5']">
-                <span class="truncate text-f13 font-medium">{{ itemName(i.item) }}</span>
-                <span v-if="i.stattrak" class="flex-none font-mono text-f8 text-[hsl(var(--tac-stattrak))]">ST™</span>
-              </div>
-            </button>
             <div
-              v-if="!replaceOptions.defaults.length && !replaceOptions.owned.length"
+              v-if="!replaceOptions.defaults.length"
               class="col-span-full py-8 text-center text-sm text-muted-foreground"
             >
               Every eligible weapon is already in this loadout.
             </div>
           </template>
+        </div>
         </div>
         </Transition>
 
@@ -9316,6 +10072,8 @@ if (MDEBUG) {
       class="min-h-0 flex-1"
       :user="user"
       :section="adminSection"
+      :bundle-build="bundleBuild"
+      :server-build="serverBuild"
       @notify="notify"
       @navigate="(section: string) => go(section ? `/admin/${section}` : '/admin')"
       @game-config="onGameConfig"
@@ -9431,7 +10189,7 @@ if (MDEBUG) {
           <!-- THE SAME SCREEN THE FOCUS VIEW IS. Identity, actions, stage,
                footer — in that order, decided by ItemScreen rather than here,
                which is the only way two surfaces stay one surface. -->
-          <ItemScreen class="min-w-[220px]" :held="craftHeld && modal3d" @panel-width="(w) => (craftPanelW = w)" :identity="{ ...craftIdentityName, price: pricesOn && itemQuote ? { total: itemQuote.total, extra: itemQuote.attachmentTotal, approx: !!itemQuote.base.price?.approx, sales: itemSales, standing: itemWearStanding, tip: itemQuoteTip, busy: itemQuoting } : null }">
+          <ItemScreen class="min-w-[220px]" :held="craftHolding && modal3d" :inset="!viewOnly" @panel-width="(w) => (craftPanelW = w)" :identity="{ ...craftIdentityName, price: pricesOn && itemQuote ? { total: itemQuote.total, extra: itemQuote.attachmentTotal, approx: !!itemQuote.base.price?.approx, sales: itemSales, standing: itemWearStanding, tip: itemQuoteTip, busy: itemQuoting } : null }">
             <template #actions>
             <!-- Settings, then which picture, then what you can do with the
                  item — broadest question first. Both screens carry the same
@@ -9472,7 +10230,7 @@ if (MDEBUG) {
               ref="craftStageCmp"
               :available="modal3dAvailable"
               :is3d="modal3d"
-              :held="craftHeld"
+              :held="craftHolding"
               :held-available="craftHeldAvailable"
               :busy="modalViewer.busy.value"
               :rarity="craft.skin.rarity"
@@ -9525,26 +10283,8 @@ if (MDEBUG) {
 
                      UNDER the cog (z-[4] vs the row's own stacking) so the cog
                      stays live and its button toggles the panel shut, and OVER
-                     the pose pills so the first click anywhere else dismisses. -->
+                     the stage so the first click anywhere else dismisses. -->
                 <div v-if="modal3d && devHudOpen" class="absolute inset-0 z-[4]" @click="devHudOpen = false"></div>
-                <!-- BELOW the 2D/3D toggle, not beside it: they are different
-                     questions (which renderer vs which pose), and stacking keeps
-                     the top edge free for the model. Not the bottom-left corner
-                     either — that is where the perf HUD draws, and the two
-                     overlapped. top-10 clears the 2D/3D pill's own height. -->
-                <PillTabs
-                  v-if="modal3d && craftTarget?.kind === 'agent'"
-                  :items="AGENT_POSES"
-                  :item-key="(p) => p.id"
-                  :item-title="(p) => p.hint"
-                  :active="agentPose"
-                  position="absolute"
-                  list-class="left-0 top-10 z-[3]"
-                  button-class="relative z-[1] rounded-md px-2.5 py-1 text-f10 uppercase tracking-wider transition-colors"
-                  @select="(id) => setAgentPose(id as 'stand' | 'open' | 'ready')"
-                >
-                  <template #default="{ item: p }">{{ p.label }}</template>
-                </PillTabs>
                 <!-- Live cost, stacked under the 2D/3D + cog row so it reads as part
                      of the same top-left column of chrome — the same corner the
                      inventory card puts it in, under the model label. It was up in
@@ -9638,6 +10378,18 @@ if (MDEBUG) {
               @update:seed="(s) => (craft!.seed = s)"
               @preview-style="previewPetStyle"
             />
+            <!-- An agent's pose and motion, where the pet keeps its clips: with
+                 the other controls for what is on the stage. They were pills
+                 over the model's top-left corner, on top of the item's name. -->
+            <AgentControls
+              v-if="craftType === 'agent' && modal3d"
+              class="animate-sheet-in"
+              :style="{ '--i': 1 }"
+              :pose="agentPose"
+              :motion="agentMotion"
+              @update:pose="setAgentPose"
+              @update:motion="setAgentMotion"
+            />
             <div v-if="attachKind === 'agent'" class="animate-sheet-in rounded-md bg-secondary/40 p-2.5" :style="{ '--i': 1 }">
               <div class="mb-1.5 text-f10 uppercase tracking-cs1 text-muted-foreground">Patches</div>
               <div class="grid gap-1.5" :style="{ gridTemplateColumns: `repeat(${patchSlotCount}, minmax(0, 1fr))` }">
@@ -9676,13 +10428,26 @@ if (MDEBUG) {
                 >{{ advancedPlacement ? 'Hide' : 'Advanced' }}</button>
               </div>
               <div class="grid gap-1.5" :style="{ gridTemplateColumns: `repeat(${stickerSlotCount}, minmax(0, 1fr))` }">
+                <!-- Draggable onto each other: slot order is draw order, so this is
+                     how one overlapping sticker goes over another — see
+                     moveSticker. -->
                 <button
                   v-for="(st, idx) in craft.stickers.slice(0, stickerSlotCount)"
                   :key="idx"
                   class="group/st relative grid h-10 place-items-center rounded border transition-colors"
-                  :class="st ? 'border-border bg-background' : 'border-dashed border-border/60 text-muted-foreground/50 hover:border-[color:var(--acc)] hover:text-[color:var(--acc)]'"
-                  :title="st ? st.name + ' (slot ' + (idx + 1) + ')' : 'Add a sticker in slot ' + (idx + 1)"
+                  :class="[
+                    st ? 'border-border bg-background' : 'border-dashed border-border/60 text-muted-foreground/50 hover:border-[color:var(--acc)] hover:text-[color:var(--acc)]',
+                    stickerDropOn === idx && stickerDragFrom !== idx && '!border-solid !border-[color:var(--acc)]',
+                    stickerDragFrom === idx && 'opacity-40',
+                  ]"
+                  :title="st ? st.name + ' (slot ' + (idx + 1) + ') — drag onto another slot to reorder; later slots draw on top' : 'Add a sticker in slot ' + (idx + 1)"
+                  :draggable="!!st"
                   @click="openPicker('sticker', idx)"
+                  @dragstart="stickerDragFrom = idx; $event.dataTransfer?.setData('text/plain', String(idx))"
+                  @dragover.prevent="stickerDragFrom != null && (stickerDropOn = idx)"
+                  @dragleave="stickerDropOn === idx && (stickerDropOn = null)"
+                  @drop.prevent="onStickerTileDrop(idx)"
+                  @dragend="stickerDragFrom = null; stickerDropOn = null"
                 >
                   <span class="absolute bottom-0 right-0.5 z-[1] font-mono text-f8 text-muted-foreground/40">{{ idx + 1 }}</span>
                   <img v-if="st?.image" :src="st.image" alt="" class="max-h-8 max-w-full object-contain" />
@@ -9874,7 +10639,11 @@ if (MDEBUG) {
                 </div>
                 <TraitBars :traits="gunTraits" :table="gunTable" :seed="Number(craft.seed ?? 1)" @seek="(s) => (craft!.seed = s)" />
               </div>
+              <!-- The rail where it measures something or nothing else moves
+                   the pattern smoothly; otherwise the bars above are the way
+                   through and this is the number they land on (gunPatternRail). -->
               <PatternScoreRail
+                v-if="gunPatternRail"
                 :model-value="craft.seed"
                 :paint-material="craft.skin.paintMaterial"
                 :model="craftTarget?.model ?? craftModel"
@@ -9883,6 +10652,15 @@ if (MDEBUG) {
                 @update:model-value="craft!.seed = $event"
                 @preview="previewPattern"
               />
+              <div v-else class="flex items-center gap-2">
+                <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">Pattern</span>
+                <input
+                  v-model.number="craft.seed"
+                  type="number" :min="1" :max="1000" step="1"
+                  class="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 font-mono text-f13 outline-none transition-colors focus:border-[color:var(--acc)]"
+                />
+                <button class="grid h-9 w-9 flex-none place-items-center rounded-md border border-input text-f13 text-muted-foreground tac-action" title="Random pattern" @click="randomSeed">🎲</button>
+              </div>
             </div>
             <!-- A PET's pattern. Neither rail fits: there is no paint to score
                  and no colour band to aim at, and neighbouring numbers are
@@ -9899,6 +10677,49 @@ if (MDEBUG) {
                 />
                 <button class="grid h-9 w-9 flex-none place-items-center rounded-md border border-input text-f13 text-muted-foreground tac-action" title="Random pattern" @click="randomSeed">🎲</button>
               </div>
+            </div>
+            <!-- A GLOVE's pattern: the gun's own controls, so the two read as the
+                 same tool. On the 22 Gen2 finishes the pattern rolls the
+                 artwork's placement: Placement bars, with the pattern number
+                 under them, preview it live (one composite dresses both hands,
+                 though CS2 rolls the second from a seed derived in game code).
+                 The older 73 roll nothing the data spells out: the scored rail
+                 still sets the number the equipped feed sends, but there is
+                 nothing to compare, and the line under it says the look is not
+                 previewed. -->
+            <div v-else-if="craftHasSeed && craftType === 'glove' && craftGloveSeedRange.known" class="animate-sheet-in rounded-md bg-secondary/40 p-2.5" :style="{ '--i': 3 }">
+              <div v-if="gloveTraits.length" class="mb-3">
+                <div class="mb-1 flex items-baseline gap-2">
+                  <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">Placement</span>
+                  <span class="ml-auto text-f10 text-muted-foreground/70">drag to place</span>
+                </div>
+                <TraitBars :traits="gloveTraits" :table="gloveTable" :seed="Number(craft.seed ?? 1)" @seek="(s) => (craft!.seed = s)" />
+              </div>
+              <!-- Same rule as the gun's (gunPatternRail): with placement bars
+                   to drag, the pattern is a number under them, not a rail of
+                   numbers that jumps the artwork around. -->
+              <PatternScoreRail
+                v-if="!gloveTraits.length"
+                glove
+                :compare="gloveSeedLive"
+                :model-value="craft.seed"
+                :paint-material="craft.skin.paintMaterial"
+                :model="craftTarget?.model ?? craftModel"
+                :min="craftGloveSeedRange.min"
+                :max="craftGloveSeedRange.max"
+                @update:model-value="craft!.seed = $event"
+                @preview="previewPattern"
+              />
+              <div v-else class="flex items-center gap-2">
+                <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">Pattern</span>
+                <input
+                  v-model.number="craft.seed"
+                  type="number" :min="craftGloveSeedRange.min" :max="craftGloveSeedRange.max" step="1"
+                  class="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 font-mono text-f13 outline-none transition-colors focus:border-[color:var(--acc)]"
+                />
+                <button class="grid h-9 w-9 flex-none place-items-center rounded-md border border-input text-f13 text-muted-foreground tac-action" title="Random pattern" @click="randomSeed">🎲</button>
+              </div>
+              <div v-if="!gloveSeedLive" class="mt-1 text-right font-mono text-f8 text-muted-foreground/60">Applies in game · not previewed here</div>
             </div>
             <div v-if="craftHasWear" class="animate-sheet-in rounded-md bg-secondary/40 p-2.5" :style="{ '--i': 4 }">
               <div class="flex items-center gap-2">
@@ -9946,22 +10767,52 @@ if (MDEBUG) {
             </div>
             <div
               v-if="craftHasStatTrak"
-              class="animate-sheet-in flex items-center justify-between rounded-md bg-secondary/40 p-2.5"
+              class="animate-sheet-in rounded-md bg-secondary/40 p-2.5"
               :style="{ '--i': 5 }"
             >
-              <span class="text-f10 uppercase tracking-cs1" :class="craft.stattrak ? 'text-[hsl(var(--tac-stattrak))]' : 'text-muted-foreground'">StatTrak™</span>
-              <button
-                role="switch"
-                :aria-checked="craft.stattrak"
-                class="relative h-5 w-9 flex-none rounded-full transition-colors"
-                :class="craft.stattrak ? 'bg-[#e0a92e]' : 'bg-muted'"
-                @click="craft.stattrak = !craft.stattrak"
-              >
-                <span
-                  class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform"
-                  :class="craft.stattrak && 'translate-x-4'"
-                ></span>
-              </button>
+              <div class="flex items-center justify-between">
+                <span class="text-f10 uppercase tracking-cs1" :class="craft.stattrak ? 'text-[hsl(var(--tac-stattrak))]' : 'text-muted-foreground'">StatTrak™</span>
+                <button
+                  role="switch"
+                  :aria-checked="craft.stattrak"
+                  class="relative h-5 w-9 flex-none rounded-full transition-colors"
+                  :class="craft.stattrak ? 'bg-[#e0a92e]' : 'bg-muted'"
+                  @click="craft.stattrak = !craft.stattrak"
+                >
+                  <span
+                    class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform"
+                    :class="craft.stattrak && 'translate-x-4'"
+                  ></span>
+                </button>
+              </div>
+              <!-- The counter, read-only. Kills are the game server's to write:
+                   an editable count would let anyone claim any number. -->
+              <div v-if="craft.stattrak" class="mt-2 flex items-center gap-2">
+                <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">Kills</span>
+                <span class="font-mono text-f13 tabular-nums text-foreground">{{ craftStatTrakCount().toLocaleString() }}</span>
+              </div>
+            </div>
+            <!-- Music kits: the kit IS its sound, so the editor plays it — the
+                 full menu theme and, when the mount has it, the round-MVP
+                 anthem the game plays when you top a round. One volume for
+                 both, the same shared level as every other player. -->
+            <div
+              v-if="craftHasMusic"
+              class="animate-sheet-in flex flex-col gap-2 rounded-md bg-secondary/40 p-2.5"
+              :style="{ '--i': 6 }"
+            >
+              <div class="flex items-center justify-between">
+                <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.preview', 'Preview') }}</span>
+                <MusicVolume wide />
+              </div>
+              <div v-if="craft.skin.audio" class="flex items-center gap-2">
+                <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.full_song', 'Full song') }}</span>
+                <MusicPlayer :src="craft.skin.audio" :volume="false" class="min-w-0 flex-1" />
+              </div>
+              <div v-if="craft.skin.mvpAudio" class="flex items-center gap-2">
+                <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.mvp', 'MVP') }}</span>
+                <MusicPlayer :src="craft.skin.mvpAudio" :volume="false" class="min-w-0 flex-1" />
+              </div>
             </div>
 
           </div>

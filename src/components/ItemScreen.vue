@@ -17,16 +17,29 @@
 // A caller supplies the CONTENT of those rows and cannot reorder them, which is
 // the whole point: the next surface that shows an item gets the same screen for
 // free, and the two that exist cannot drift apart again.
-import { onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { PanelRightOpen } from "lucide-vue-next";
 import ItemIdentity from "./ItemIdentity.vue";
+import { isCompact } from "../responsive";
 
 const props = defineProps<{
   /** Passed through to ItemIdentity — see it for the shape. */
   identity: InstanceType<typeof ItemIdentity>["$props"];
   /** First person — folds the details panel away. See below. */
   held?: boolean;
+  /**
+   * The stage is NOT pulled out to the card's edges, so it starts exactly where
+   * this header does — and the name and the buttons sat on its very corner. That
+   * never showed while the stage was the card's own dark colour; a lit backdrop
+   * (the CS2 haze) draws the stage's edge, and the text was jammed against it.
+   * Set by the item modal while editing; focus and view-only pull the stage out
+   * past their padding, which already insets the header.
+   */
+  inset?: boolean;
 }>();
+const headInset = computed(() => (props.inset ? (isCompact.value ? "px-3 pt-2.5" : "px-5 pt-4") : ""));
+const panelTop = computed(() => (props.inset ? (isCompact.value ? "top-14" : "top-16") : "top-12"));
+const panelRight = computed(() => (props.inset ? (isCompact.value ? "right-3" : "right-5") : "right-0"));
 
 const emit = defineEmits<{
   /**
@@ -101,7 +114,7 @@ onBeforeUnmount(() => panelRO?.disconnect());
          see `over-art` in the stylesheet, a shadow that costs the image
          nothing. Pointer-transparent except the controls: the gap between the
          name and the buttons is stage, and dragging there turns the model. -->
-    <div class="over-art pointer-events-none absolute inset-x-0 top-0 z-[7] flex items-start justify-between gap-4">
+    <div class="over-art pointer-events-none absolute inset-x-0 top-0 z-[7] flex items-start justify-between gap-4" :class="headInset">
       <div class="pointer-events-auto"><ItemIdentity v-bind="identity" /></div>
       <div class="pointer-events-auto flex flex-none items-center gap-2.5"><slot name="actions" /></div>
     </div>
@@ -111,7 +124,8 @@ onBeforeUnmount(() => panelRO?.disconnect());
          from, so getting it back is where losing it happened. -->
     <button
       v-if="$slots.panel && !panelOpen"
-      class="absolute right-0 top-12 z-[6] flex items-center gap-1.5 rounded-md border border-border/70 bg-background/80 px-2 py-1 text-f9 uppercase tracking-cs2 text-muted-foreground backdrop-blur-sm transition-colors hover:text-foreground"
+      class="absolute z-[6] flex items-center gap-1.5 rounded-md border border-border/70 bg-background/80 px-2 py-1 text-f9 uppercase tracking-cs2 text-muted-foreground backdrop-blur-sm transition-colors hover:text-foreground"
+      :class="[panelTop, panelRight]"
       title="Show this item's details"
       @click="panelOpen = true"
     >
@@ -119,11 +133,17 @@ onBeforeUnmount(() => panelRO?.disconnect());
     </button>
     <!-- `pointer-events-none` on the rail, restored on the panel: the empty
          space under a short list is stage, and dragging the model there should
-         turn it. -->
+         turn it.
+         `bottom-12`, not `bottom-0`: the stage's own bottom-right controls (the
+         first-person toggle and the screenshot button) sit in this same column,
+         and on a short window a long panel ran down over them — StatTrak under
+         the toggle. Ending the panel above them costs nothing on a tall screen,
+         where the list never reaches that far, and it scrolls on a short one. -->
     <div
       v-if="$slots.panel && panelOpen"
       ref="panelEl"
-      class="pointer-events-none absolute bottom-0 right-0 top-12 z-[5] flex w-[308px] flex-col overflow-y-auto pb-2 pl-2"
+      class="pointer-events-none absolute bottom-12 z-[5] flex w-[308px] flex-col overflow-y-auto pb-2 pl-2"
+      :class="[panelTop, panelRight]"
     >
       <div class="pointer-events-auto flex flex-col gap-2.5">
         <!-- The way back out, on the panel's own top edge rather than as a
