@@ -3772,6 +3772,11 @@ interface SteamPage {
 const STEAM_PAGE = 1000;
 const STEAM_MAX_PAGES = 10;
 
+// Steam rate-limits the public inventory endpoint per IP, and some hosting IPs
+// get refused (429) even when idle. Point this at a reverse proxy on another
+// host to send only the inventory fetch out through that host's IP.
+const STEAM_COMMUNITY_URL = (process.env.STEAM_COMMUNITY_URL || "https://steamcommunity.com").replace(/\/+$/, "");
+
 // NB: plain field assignment, not a constructor parameter property — node's
 // --experimental-strip-types only erases types, so it can't emit the implicit
 // `this.status = status` a parameter property relies on.
@@ -3800,7 +3805,7 @@ async function fetchSteamInventory(steamId: string) {
   if (waiting > 0) throw steamRateLimited(waiting);
   for (let page = 0; page < STEAM_MAX_PAGES; page++) {
     const url =
-      `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=${STEAM_PAGE}` +
+      `${STEAM_COMMUNITY_URL}/inventory/${steamId}/730/2?l=english&count=${STEAM_PAGE}` +
       (start ? `&start_assetid=${start}` : "");
     let payload: SteamPage;
     try {
