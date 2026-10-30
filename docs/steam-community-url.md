@@ -55,9 +55,11 @@ overlays, so nothing changes until you apply it:
    lands on the node Steam refuses. Pick a node with its own public IP: two
    nodes behind the same NAT look like one to Steam.
 
-2. Apply it: `kubectl apply -k k8s/steam-egress`.
+2. Apply it: `kubectl apply -k k8s/steam-egress` from this repo, or
+   `kubectl apply -k custom/inventory/steam-egress` from the panel repo when
+   `k8s/` was copied to `custom/inventory/`.
 3. Set `STEAM_COMMUNITY_URL=http://steam-egress:8080` in the plugin's
-   `inventory.env` on the panel and deploy again (`./custom.sh inventory` from
+   `base/inventory.env` on the panel and deploy again (`./custom.sh inventory` from
    the panel repo) so the backend picks it up.
 
 The config uses `10.43.0.10`, k3s's default cluster DNS address; change the
