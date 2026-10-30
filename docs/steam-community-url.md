@@ -38,3 +38,30 @@ server {
 Then `STEAM_COMMUNITY_URL=http://<proxy service>:8080`. Keep the proxy
 cluster-internal: it carries only public inventory data, but an open one lets
 anyone spend that host's Steam allowance.
+
+## Running the proxy in the cluster
+
+`k8s/steam-egress/` runs that nginx proxy as a Deployment and a ClusterIP
+Service named `steam-egress` in the `5stack` namespace. It is not part of the
+overlays, so nothing changes until you apply it:
+
+1. Label the node whose IP Steam still answers (often the panel host):
+
+   ```bash
+   kubectl label node <node> 5stack-steam-egress=true
+   ```
+
+   The pod stays Pending until a node carries the label, so it never quietly
+   lands on the node Steam refuses. Pick a node with its own public IP: two
+   nodes behind the same NAT look like one to Steam.
+
+2. Apply it: `kubectl apply -k k8s/steam-egress`.
+3. Set `STEAM_COMMUNITY_URL=http://steam-egress:8080` in the plugin's
+   `inventory.env` on the panel and deploy again (`./custom.sh inventory` from
+   the panel repo) so the backend picks it up.
+
+The config uses `10.43.0.10`, k3s's default cluster DNS address; change the
+`resolver` line if your cluster's DNS service has another IP
+(`kubectl -n kube-system get svc kube-dns`). To remove it:
+unset `STEAM_COMMUNITY_URL`, deploy again, then
+`kubectl delete -k k8s/steam-egress`.
